@@ -1,0 +1,18 @@
+I would like to create a web app using the IIIF protocol to display an image.The IIIF viewer should be built from scratch rather than using a library like OpenSeaDragon.
+
+The app should have 2 modes of interaction: 1) pan and zoom the image; 2) draw a rectangle on it. The webapp should use HTML, CSS and Javascript, and be packaged in a single html file. Use this as the default value for a IIIF info request on an image: http://www.homermultitext.org/iipsrv?IIIF=/project/homer/pyramidal/deepzoom/hmt/vaimg/2017a/VA012RN_0013.tif/info.json
+
+Exercise special care not to redefine global variables recording data about the user-drawn rectanges. Use anonymous CORS to avoid restrictions on cross-origin access.
+
+On initially loading an image, the entire image should be displayed to the user.
+
+The user-defined rectangles should highlight the same area of the image when the user pans and zooms.
+
+The app should capture the coordinates of each rectangle, and display them to the user in percentage terms as a percent of the whole image, scaled from 0.0 to 1.0.
+  
+Each time the user draws a rectangle, The app should copy the entire list of rectangle coordinates to the user's clipboard, one rectangle per line, with the four values separated by commas.
+
+In highlighting rectangles on the image, please omit the border on the rectangle, and use the same opacity for the entire rectangle. Please rotate through a palette of different colors as you highlight each rectangle.
+
+The app should offer an option to clear all rectangles. This should remove the rectangles from the display highlights and empty out the saved list of coordinates.
+

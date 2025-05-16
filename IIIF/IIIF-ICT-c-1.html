@@ -1,0 +1,667 @@
+
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body {
+									background-color: white; /* Ensure the iframe has a white background */
+								}
+
+								
+    body { background: #222; color: #eee; font-family: sans-serif; margin: 0;}
+    #topbar { background: #333; padding: 10px;}
+    #controls { margin-bottom: 8px;}
+    #image-loader { margin-bottom:10px; }
+    #image-url-input { width:380px; font-size:14px;}
+    #viewer-container { 
+      background: #000; 
+      display: flex; 
+      justify-content: center;
+      align-items: center;
+      height: calc(100vh - 80px); 
+      min-height: 400px;
+    }
+    #iiif-canvas { 
+      background: #111; 
+      cursor: grab; 
+      outline: 1px solid #333;
+      display: block;
+    }
+    #iiif-canvas.drawing { cursor: crosshair; }
+    #coords-output { font-size: 13px; background: #252525; border: 1px solid #444; padding: 8px; margin: 5px 0;}
+    button { margin-right: 6px; }
+    label { margin-right: 16px;}
+    #error-msg {color:#ff8888;margin-top:3px;margin-bottom:0;}
+  
+
+							</style>
+                        </head>
+                        <body>
+                            <!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Minimal IIIF Viewer with Drawing</title>
+  <style>
+    body { background: #222; color: #eee; font-family: sans-serif; margin: 0;}
+    #topbar { background: #333; padding: 10px;}
+    #controls { margin-bottom: 8px;}
+    #image-loader { margin-bottom:10px; }
+    #image-url-input { width:380px; font-size:14px;}
+    #viewer-container { 
+      background: #000; 
+      display: flex; 
+      justify-content: center;
+      align-items: center;
+      height: calc(100vh - 80px); 
+      min-height: 400px;
+    }
+    #iiif-canvas { 
+      background: #111; 
+      cursor: grab; 
+      outline: 1px solid #333;
+      display: block;
+    }
+    #iiif-canvas.drawing { cursor: crosshair; }
+    #coords-output { font-size: 13px; background: #252525; border: 1px solid #444; padding: 8px; margin: 5px 0;}
+    button { margin-right: 6px; }
+    label { margin-right: 16px;}
+    #error-msg {color:#ff8888;margin-top:3px;margin-bottom:0;}
+  </style>
+</head>
+<body>
+<div id="topbar">
+  <div id="image-loader">
+    <label for="image-url-input">IIIF <code>info.json</code> URL:</label>
+    <input id="image-url-input" type="url" value="https://iiif.wellcomecollection.org/image/V0035006/info.json" />
+    <button id="load-image-btn">Load Image</button>
+    <span id="error-msg"></span>
+  </div>
+  <div id="controls">
+    <button id="mode-pan" data-mode="pan" disabled>Pan/Zoom mode</button>
+    <button id="mode-draw" data-mode="draw">Rectangle Draw mode</button>
+    <button id="clear-rects">Clear Rectangles</button>
+  </div>
+  <div>
+    <b>Rectangles (percent coords):</b>
+    <pre id="coords-output">(none)</pre>
+  </div>
+</div>
+<div id="viewer-container">
+  <canvas id="iiif-canvas" width="1200" height="800"></canvas>
+</div>
+<script>
+  // --- CANVAS SETUP ---
+  const canvas = document.getElementById('iiif-canvas');
+  const ctx = canvas.getContext('2d');
+  const coordsOutput = document.getElementById('coords-output');
+  const imgInput = document.getElementById('image-url-input');
+  const loadBtn  = document.getElementById('load-image-btn');
+  const errorMsg = document.getElementById('error-msg');
+
+  // --- GLOBAL STATE: image info, transformation, rectangles ---
+  let imgWidth = 0, imgHeight = 0, tileWidth = 0, tileHeight = 0, iiifBase = "";
+  let imageEL = new window.Image();
+
+  let zoom = 1;
+  let panX = 0, panY = 0;
+  let minZoom = 1, maxZoom = 12;
+
+  let mode = 'pan';
+  let isPanning = false;
+  let lastPan = {x:0, y:0};
+  let isDrawingRect = false;
+  let startRect = null;
+  let currRect = null;
+
+  const rectangles = [];
+  const rectColors = [
+    "rgba(255,62,62,0.27)", "rgba(62,240,195,0.27)", "rgba(244,211,66,0.30)",
+    "rgba(111,176,255,0.26)", "rgba(239,87,225,0.28)","rgba(191,248,62,0.24)"
+  ];
+
+  // --- INIT ---
+
+  let initialIIIF = imgInput.value;
+  function initOrReloadImage(infoUrl) {
+    errorMsg.textContent = "";
+    fetch(infoUrl)
+      .then(r => {
+        if(!r.ok) throw new Error(r.statusText);
+        return r.json();
+      })
+      .then(info => {
+        imgWidth = info.width;
+        imgHeight = info.height;
+        if(info.tiles && info.tiles.length) {
+          tileWidth = info.tiles[0].width;
+          tileHeight = info.tiles[0].height || tileWidth;
+        }
+        iiifBase = info['@id'] || infoUrl.replace(/\/info\.json$/, '');
+        loadIIIFImage(iiifBase, imgWidth, imgHeight);
+      })
+      .catch(e => {
+        errorMsg.textContent = "Could not load IIIF info (" + e.message + ")";
+      });
+  }
+  function loadIIIFImage(iiifBase, w, h) {
+    // Clear rectangles on new image
+    rectangles.splice(0, rectangles.length);
+    updateCoordsOutput();
+
+    imageEL = new window.Image();
+    imageEL.crossOrigin = "anonymous";
+    imageEL.onload = function() {
+      // Fit to canvas
+      let scaleX = canvas.width / w;
+      let scaleY = canvas.height / h;
+      zoom = Math.min(scaleX, scaleY);
+      minZoom = zoom*0.5;
+      maxZoom = zoom*10;
+      panX = (canvas.width - w*zoom)/2;
+      panY = (canvas.height - h*zoom)/2;
+      draw();
+    };
+    imageEL.onerror = function() {
+      errorMsg.textContent = "Could not load IIIF image (CORS, or invalid image server)";
+    }
+    imageEL.src = `${iiifBase}/full/full/0/default.jpg`;
+  }
+
+  // On startup, load initial image
+  initOrReloadImage(initialIIIF);
+
+  // --- IIIF image switching control ---
+  loadBtn.onclick = function() {
+    const url = imgInput.value.trim();
+    if(!url) return;
+    if(!/\/info\.json$/.test(url)) {
+      errorMsg.textContent = "Please enter a valid IIIF info.json URL";
+      return;
+    }
+    errorMsg.textContent = "";
+    mode = 'pan';
+    document.getElementById('mode-pan').disabled = true;
+    document.getElementById('mode-draw').disabled = false;
+    canvas.classList.remove('drawing');
+    initOrReloadImage(url);
+  };
+
+  function imgToCanvasX(x) { return panX + x * zoom; }
+  function imgToCanvasY(y) { return panY + y * zoom; }
+  function canvasToImgX(x) { return (x - panX)/zoom; }
+  function canvasToImgY(y) { return (y - panY)/zoom; }
+
+  document.getElementById('mode-pan').onclick = function(){
+    mode = "pan";
+    this.disabled = true;
+    document.getElementById('mode-draw').disabled = false;
+    canvas.classList.remove('drawing');
+  };
+  document.getElementById('mode-draw').onclick = function() {
+    mode = "draw";
+    this.disabled = true;
+    document.getElementById('mode-pan').disabled = false;
+    canvas.classList.add('drawing');
+  };
+
+  document.getElementById('clear-rects').onclick = function() {
+    clearAllRectangles();
+  };
+  function clearAllRectangles() {
+    rectangles.splice(0, rectangles.length);
+    updateCoordsOutput();
+    draw();
+  }
+
+  function addRectangle(percentRect) {
+    rectangles.push(percentRect);
+    updateCoordsOutput();
+    copyAllRectsToClipboard();
+  }
+  function updateCoordsOutput() {
+    if(rectangles.length === 0) {
+      coordsOutput.textContent = "(none)";
+      return;
+    }
+    coordsOutput.textContent = rectangles.map(r => 
+      [r.x.toFixed(5), r.y.toFixed(5), r.w.toFixed(5), r.h.toFixed(5)].join(",")
+    ).join("\n");
+  }
+  function copyAllRectsToClipboard() {
+    if(rectangles.length === 0) return;
+    const coordsStr = rectangles.map(r =>
+      [r.x.toFixed(5), r.y.toFixed(5), r.w.toFixed(5), r.h.toFixed(5)].join(",")
+    ).join("\n");
+    navigator.clipboard.writeText(coordsStr)
+      .catch(()=>{});
+  }
+
+  canvas.addEventListener('mousedown', function(e){
+    if(!imgWidth) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if(mode==='pan') {
+      isPanning = true;
+      lastPan.x = mx;
+      lastPan.y = my;
+      canvas.style.cursor = "grabbing";
+    } else if(mode==='draw') {
+      isDrawingRect = true;
+      startRect = { x: mx, y: my };
+      currRect = null;
+    }
+  });
+  canvas.addEventListener('mousemove', function(e){
+    if(!imgWidth) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if(mode==='pan' && isPanning) {
+      panX += mx - lastPan.x;
+      panY += my - lastPan.y;
+      lastPan.x = mx;
+      lastPan.y = my;
+      draw();
+    } else if(mode==='draw' && isDrawingRect) {
+      currRect = {
+        x0: startRect.x, y0: startRect.y,
+        x1: mx, y1: my
+      };
+      draw();
+    }
+  });
+  canvas.addEventListener('mouseup', function(e){
+    if(!imgWidth) return;
+    if(mode==='pan') {
+      isPanning = false;
+      canvas.style.cursor = "grab";
+    } else if(mode==='draw' && isDrawingRect) {
+      isDrawingRect = false;
+      const { x: x0, y: y0 } = startRect;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      let ix0 = canvasToImgX(x0);
+      let iy0 = canvasToImgY(y0);
+      let ix1 = canvasToImgX(mx);
+      let iy1 = canvasToImgY(my);
+      ix0 = Math.max(0, Math.min(imgWidth, ix0));
+      iy0 = Math.max(0, Math.min(imgHeight, iy0));
+      ix1 = Math.max(0, Math.min(imgWidth, ix1));
+      iy1 = Math.max(0, Math.min(imgHeight, iy1));
+      let rx = Math.min(ix0, ix1)/imgWidth;
+      let ry = Math.min(iy0, iy1)/imgHeight;
+      let rw = Math.abs(ix1-ix0)/imgWidth;
+      let rh = Math.abs(iy1-iy0)/imgHeight;
+      if(rw>0.002 && rh>0.002) {
+        addRectangle({x: rx, y: ry, w: rw, h: rh});
+      }
+      currRect = null;
+      draw();
+    }
+  });
+  canvas.addEventListener('mouseleave', function(){
+    isPanning = false;
+    isDrawingRect = false;
+    currRect = null;
+    canvas.style.cursor = (mode==='draw') ? "crosshair":"grab";
+    draw();
+  });
+
+  canvas.addEventListener('wheel', function(e){
+    if (mode!=='pan' || !imgWidth) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const imgX = canvasToImgX(mx), imgY = canvasToImgY(my);
+    let zoomFactor = Math.exp(-e.deltaY * 0.0023);
+    let newZoom = zoom * zoomFactor;
+    newZoom = Math.max(minZoom, Math.min(newZoom, maxZoom));
+    zoomFactor = newZoom/zoom;
+    panX -= (imgX*zoomFactor - imgX)*zoom;
+    panY -= (imgY*zoomFactor - imgY)*zoom;
+    zoom = newZoom;
+    draw();
+  }, {passive:false});
+
+  function draw() {
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    if(imgWidth) {
+      ctx.save();
+      ctx.translate(panX, panY);
+      ctx.scale(zoom, zoom);
+      ctx.drawImage(imageEL, 0, 0, imgWidth, imgHeight);
+      ctx.restore();
+    }
+
+    rectangles.forEach((r,i)=>{
+      ctx.save();
+      ctx.globalAlpha = 1.0;
+      const color = rectColors[i % rectColors.length];
+      ctx.fillStyle = color;
+      let x = imgToCanvasX(r.x*imgWidth);
+      let y = imgToCanvasY(r.y*imgHeight);
+      let w = r.w*imgWidth*zoom;
+      let h = r.h*imgHeight*zoom;
+      ctx.fillRect(x, y, w, h);
+      ctx.restore();
+    });
+
+    if(mode==='draw' && currRect) {
+      ctx.save();
+      ctx.globalAlpha = 0.36;
+      ctx.fillStyle = rectColors[rectangles.length % rectColors.length];
+      let x0 = currRect.x0, y0 = currRect.y0, x1 = currRect.x1, y1 = currRect.y1;
+      let rx = Math.min(x0,x1), ry = Math.min(y0,y1), rw = Math.abs(x1-x0), rh = Math.abs(y1-y0);
+      ctx.fillRect(rx,ry,rw,rh);
+      ctx.restore();
+    }
+  }
+
+  window.addEventListener('resize', ()=>{
+    canvas.width = Math.max(320, window.innerWidth*0.9);
+    canvas.height = Math.max(320, (window.innerHeight-80)*0.9);
+    if(imgWidth) draw();
+  });
+
+  (function(){
+    canvas.width = Math.max(320, window.innerWidth*0.9);
+    canvas.height = Math.max(320, (window.innerHeight-80)*0.9);
+  })();
+
+</script>
+</body>
+</html>
+
+
+
+							<script>
+                            	
+  // --- CANVAS SETUP ---
+  const canvas = document.getElementById('iiif-canvas');
+  const ctx = canvas.getContext('2d');
+  const coordsOutput = document.getElementById('coords-output');
+  const imgInput = document.getElementById('image-url-input');
+  const loadBtn  = document.getElementById('load-image-btn');
+  const errorMsg = document.getElementById('error-msg');
+
+  // --- GLOBAL STATE: image info, transformation, rectangles ---
+  let imgWidth = 0, imgHeight = 0, tileWidth = 0, tileHeight = 0, iiifBase = "";
+  let imageEL = new window.Image();
+
+  let zoom = 1;
+  let panX = 0, panY = 0;
+  let minZoom = 1, maxZoom = 12;
+
+  let mode = 'pan';
+  let isPanning = false;
+  let lastPan = {x:0, y:0};
+  let isDrawingRect = false;
+  let startRect = null;
+  let currRect = null;
+
+  const rectangles = [];
+  const rectColors = [
+    "rgba(255,62,62,0.27)", "rgba(62,240,195,0.27)", "rgba(244,211,66,0.30)",
+    "rgba(111,176,255,0.26)", "rgba(239,87,225,0.28)","rgba(191,248,62,0.24)"
+  ];
+
+  // --- INIT ---
+
+  let initialIIIF = imgInput.value;
+  function initOrReloadImage(infoUrl) {
+    errorMsg.textContent = "";
+    fetch(infoUrl)
+      .then(r => {
+        if(!r.ok) throw new Error(r.statusText);
+        return r.json();
+      })
+      .then(info => {
+        imgWidth = info.width;
+        imgHeight = info.height;
+        if(info.tiles && info.tiles.length) {
+          tileWidth = info.tiles[0].width;
+          tileHeight = info.tiles[0].height || tileWidth;
+        }
+        iiifBase = info['@id'] || infoUrl.replace(/\/info\.json$/, '');
+        loadIIIFImage(iiifBase, imgWidth, imgHeight);
+      })
+      .catch(e => {
+        errorMsg.textContent = "Could not load IIIF info (" + e.message + ")";
+      });
+  }
+  function loadIIIFImage(iiifBase, w, h) {
+    // Clear rectangles on new image
+    rectangles.splice(0, rectangles.length);
+    updateCoordsOutput();
+
+    imageEL = new window.Image();
+    imageEL.crossOrigin = "anonymous";
+    imageEL.onload = function() {
+      // Fit to canvas
+      let scaleX = canvas.width / w;
+      let scaleY = canvas.height / h;
+      zoom = Math.min(scaleX, scaleY);
+      minZoom = zoom*0.5;
+      maxZoom = zoom*10;
+      panX = (canvas.width - w*zoom)/2;
+      panY = (canvas.height - h*zoom)/2;
+      draw();
+    };
+    imageEL.onerror = function() {
+      errorMsg.textContent = "Could not load IIIF image (CORS, or invalid image server)";
+    }
+    imageEL.src = `${iiifBase}/full/full/0/default.jpg`;
+  }
+
+  // On startup, load initial image
+  initOrReloadImage(initialIIIF);
+
+  // --- IIIF image switching control ---
+  loadBtn.onclick = function() {
+    const url = imgInput.value.trim();
+    if(!url) return;
+    if(!/\/info\.json$/.test(url)) {
+      errorMsg.textContent = "Please enter a valid IIIF info.json URL";
+      return;
+    }
+    errorMsg.textContent = "";
+    mode = 'pan';
+    document.getElementById('mode-pan').disabled = true;
+    document.getElementById('mode-draw').disabled = false;
+    canvas.classList.remove('drawing');
+    initOrReloadImage(url);
+  };
+
+  function imgToCanvasX(x) { return panX + x * zoom; }
+  function imgToCanvasY(y) { return panY + y * zoom; }
+  function canvasToImgX(x) { return (x - panX)/zoom; }
+  function canvasToImgY(y) { return (y - panY)/zoom; }
+
+  document.getElementById('mode-pan').onclick = function(){
+    mode = "pan";
+    this.disabled = true;
+    document.getElementById('mode-draw').disabled = false;
+    canvas.classList.remove('drawing');
+  };
+  document.getElementById('mode-draw').onclick = function() {
+    mode = "draw";
+    this.disabled = true;
+    document.getElementById('mode-pan').disabled = false;
+    canvas.classList.add('drawing');
+  };
+
+  document.getElementById('clear-rects').onclick = function() {
+    clearAllRectangles();
+  };
+  function clearAllRectangles() {
+    rectangles.splice(0, rectangles.length);
+    updateCoordsOutput();
+    draw();
+  }
+
+  function addRectangle(percentRect) {
+    rectangles.push(percentRect);
+    updateCoordsOutput();
+    copyAllRectsToClipboard();
+  }
+  function updateCoordsOutput() {
+    if(rectangles.length === 0) {
+      coordsOutput.textContent = "(none)";
+      return;
+    }
+    coordsOutput.textContent = rectangles.map(r => 
+      [r.x.toFixed(5), r.y.toFixed(5), r.w.toFixed(5), r.h.toFixed(5)].join(",")
+    ).join("\n");
+  }
+  function copyAllRectsToClipboard() {
+    if(rectangles.length === 0) return;
+    const coordsStr = rectangles.map(r =>
+      [r.x.toFixed(5), r.y.toFixed(5), r.w.toFixed(5), r.h.toFixed(5)].join(",")
+    ).join("\n");
+    navigator.clipboard.writeText(coordsStr)
+      .catch(()=>{});
+  }
+
+  canvas.addEventListener('mousedown', function(e){
+    if(!imgWidth) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if(mode==='pan') {
+      isPanning = true;
+      lastPan.x = mx;
+      lastPan.y = my;
+      canvas.style.cursor = "grabbing";
+    } else if(mode==='draw') {
+      isDrawingRect = true;
+      startRect = { x: mx, y: my };
+      currRect = null;
+    }
+  });
+  canvas.addEventListener('mousemove', function(e){
+    if(!imgWidth) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if(mode==='pan' && isPanning) {
+      panX += mx - lastPan.x;
+      panY += my - lastPan.y;
+      lastPan.x = mx;
+      lastPan.y = my;
+      draw();
+    } else if(mode==='draw' && isDrawingRect) {
+      currRect = {
+        x0: startRect.x, y0: startRect.y,
+        x1: mx, y1: my
+      };
+      draw();
+    }
+  });
+  canvas.addEventListener('mouseup', function(e){
+    if(!imgWidth) return;
+    if(mode==='pan') {
+      isPanning = false;
+      canvas.style.cursor = "grab";
+    } else if(mode==='draw' && isDrawingRect) {
+      isDrawingRect = false;
+      const { x: x0, y: y0 } = startRect;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      let ix0 = canvasToImgX(x0);
+      let iy0 = canvasToImgY(y0);
+      let ix1 = canvasToImgX(mx);
+      let iy1 = canvasToImgY(my);
+      ix0 = Math.max(0, Math.min(imgWidth, ix0));
+      iy0 = Math.max(0, Math.min(imgHeight, iy0));
+      ix1 = Math.max(0, Math.min(imgWidth, ix1));
+      iy1 = Math.max(0, Math.min(imgHeight, iy1));
+      let rx = Math.min(ix0, ix1)/imgWidth;
+      let ry = Math.min(iy0, iy1)/imgHeight;
+      let rw = Math.abs(ix1-ix0)/imgWidth;
+      let rh = Math.abs(iy1-iy0)/imgHeight;
+      if(rw>0.002 && rh>0.002) {
+        addRectangle({x: rx, y: ry, w: rw, h: rh});
+      }
+      currRect = null;
+      draw();
+    }
+  });
+  canvas.addEventListener('mouseleave', function(){
+    isPanning = false;
+    isDrawingRect = false;
+    currRect = null;
+    canvas.style.cursor = (mode==='draw') ? "crosshair":"grab";
+    draw();
+  });
+
+  canvas.addEventListener('wheel', function(e){
+    if (mode!=='pan' || !imgWidth) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const imgX = canvasToImgX(mx), imgY = canvasToImgY(my);
+    let zoomFactor = Math.exp(-e.deltaY * 0.0023);
+    let newZoom = zoom * zoomFactor;
+    newZoom = Math.max(minZoom, Math.min(newZoom, maxZoom));
+    zoomFactor = newZoom/zoom;
+    panX -= (imgX*zoomFactor - imgX)*zoom;
+    panY -= (imgY*zoomFactor - imgY)*zoom;
+    zoom = newZoom;
+    draw();
+  }, {passive:false});
+
+  function draw() {
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    if(imgWidth) {
+      ctx.save();
+      ctx.translate(panX, panY);
+      ctx.scale(zoom, zoom);
+      ctx.drawImage(imageEL, 0, 0, imgWidth, imgHeight);
+      ctx.restore();
+    }
+
+    rectangles.forEach((r,i)=>{
+      ctx.save();
+      ctx.globalAlpha = 1.0;
+      const color = rectColors[i % rectColors.length];
+      ctx.fillStyle = color;
+      let x = imgToCanvasX(r.x*imgWidth);
+      let y = imgToCanvasY(r.y*imgHeight);
+      let w = r.w*imgWidth*zoom;
+      let h = r.h*imgHeight*zoom;
+      ctx.fillRect(x, y, w, h);
+      ctx.restore();
+    });
+
+    if(mode==='draw' && currRect) {
+      ctx.save();
+      ctx.globalAlpha = 0.36;
+      ctx.fillStyle = rectColors[rectangles.length % rectColors.length];
+      let x0 = currRect.x0, y0 = currRect.y0, x1 = currRect.x1, y1 = currRect.y1;
+      let rx = Math.min(x0,x1), ry = Math.min(y0,y1), rw = Math.abs(x1-x0), rh = Math.abs(y1-y0);
+      ctx.fillRect(rx,ry,rw,rh);
+      ctx.restore();
+    }
+  }
+
+  window.addEventListener('resize', ()=>{
+    canvas.width = Math.max(320, window.innerWidth*0.9);
+    canvas.height = Math.max(320, (window.innerHeight-80)*0.9);
+    if(imgWidth) draw();
+  });
+
+  (function(){
+    canvas.width = Math.max(320, window.innerWidth*0.9);
+    canvas.height = Math.max(320, (window.innerHeight-80)*0.9);
+  })();
+
+
+
+							</script>
+                        </body>
+                        </html>
+                    

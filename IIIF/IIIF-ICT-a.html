@@ -1,0 +1,980 @@
+
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body {
+									background-color: white; /* Ensure the iframe has a white background */
+								}
+
+								
+        body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        .controls { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;}
+        .controls label { margin-right: 5px; }
+        .controls input[type="text"] { flex-grow: 1; min-width: 300px; }
+        #iiifCanvas { border: 1px solid black; cursor: grab; touch-action: none; /* For pointer events */ }
+        #coordsContainer { padding: 10px; background-color: #e9e9e9; font-size: 0.9em; max-height: 150px; overflow-y: auto; border-top: 1px solid #ccc;}
+        #coordsContainer pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden;}
+        .canvas-container { flex-grow: 1; display: flex; justify-content: center; align-items: center; overflow: hidden; background-color: #ddd;}
+    
+
+							</style>
+                        </head>
+                        <body>
+                            <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom IIIF Viewer</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        .controls { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;}
+        .controls label { margin-right: 5px; }
+        .controls input[type="text"] { flex-grow: 1; min-width: 300px; }
+        #iiifCanvas { border: 1px solid black; cursor: grab; touch-action: none; /* For pointer events */ }
+        #coordsContainer { padding: 10px; background-color: #e9e9e9; font-size: 0.9em; max-height: 150px; overflow-y: auto; border-top: 1px solid #ccc;}
+        #coordsContainer pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        .main-content { flex-grow: 1; display: flex; flex-direction: column; overflow: hidden;}
+        .canvas-container { flex-grow: 1; display: flex; justify-content: center; align-items: center; overflow: hidden; background-color: #ddd;}
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <label for="iiifUrl">IIIF Info URL:</label>
+        <input type="text" id="iiifUrl" value="http://www.homermultitext.org/iipsrv?IIIF=/project/homer/pyramidal/deepzoom/hmt/vaimg/2017a/VA012RN_0013.tif/info.json">
+        <button id="loadIiif">Load Image</button>
+        <span>Mode:</span>
+        <input type="radio" id="modePan" name="interactionMode" value="pan" checked>
+        <label for="modePan">Pan/Zoom</label>
+        <input type="radio" id="modeDraw" name="interactionMode" value="draw">
+        <label for="modeDraw">Draw Rectangle</label>
+        <button id="clearRects">Clear Rectangles</button>
+    </div>
+
+    <div class="main-content">
+        <div class="canvas-container" id="canvasContainer">
+            <canvas id="iiifCanvas"></canvas>
+        </div>
+        <div id="coordsContainer">
+            <h4>Rectangle Coordinates (X, Y, Width, Height - % of image):</h4>
+            <pre id="coordsOutput"></pre>
+        </div>
+    </div>
+
+    <script>
+        // --- Global-like state variables (declared in this top-level script scope) ---
+        let iiifInfo = null;
+        let imageFullWidth = 0;
+        let imageFullHeight = 0;
+        let currentScale = 1.0; // Zoom level of the full image
+        let offsetX = 0; // Pan X: top-left of image relative to canvas top-left
+        let offsetY = 0; // Pan Y
+        const rectangles = []; // Stores {x, y, w, h (percentage), color}
+        let currentColorIndex = 0;
+        const RECT_COLORS = [
+            'rgba(255, 0, 0, 0.4)',   // Red
+            'rgba(0, 255, 0, 0.4)',   // Green
+            'rgba(0, 0, 255, 0.4)',   // Blue
+            'rgba(255, 255, 0, 0.4)', // Yellow
+            'rgba(255, 0, 255, 0.4)', // Magenta
+            'rgba(0, 255, 255, 0.4)'  // Cyan
+        ];
+        let tileCache = {}; // Cache for loaded image tiles: { tileKey: ImageElement }
+
+        // --- Interaction State ---
+        let activeMode = 'pan'; // 'pan' or 'draw'
+        let isPointerDown = false;
+        let lastPointerX = 0;
+        let lastPointerY = 0;
+        let drawStartX = 0, drawStartY = 0; // In image coordinates for current rect
+        let currentDrawingRect = null; // {x, y, w, h} in image percentage coordinates
+
+        // --- DOM Elements ---
+        const canvas = document.getElementById('iiifCanvas');
+        const ctx = canvas.getContext('2d');
+        const iiifUrlInput = document.getElementById('iiifUrl');
+        const loadButton = document.getElementById('loadIiif');
+        const modePanRadio = document.getElementById('modePan');
+        const modeDrawRadio = document.getElementById('modeDraw');
+        const clearRectsButton = document.getElementById('clearRects');
+        const coordsOutput = document.getElementById('coordsOutput');
+        const canvasContainer = document.getElementById('canvasContainer');
+
+        // --- Initialization ---
+        function init() {
+            resizeCanvas();
+            window.addEventListener('resize', () => {
+                resizeCanvas();
+                // No need to explicitly call drawCanvas here if image is loaded,
+                // setInitialImageView will handle it via resizeCanvas.
+                // If no image, drawCanvas will show the placeholder.
+                if (!iiifInfo) requestAnimationFrame(drawCanvas);
+            });
+
+            loadButton.addEventListener('click', loadIIIFImage);
+            modePanRadio.addEventListener('change', handleModeChange);
+            modeDrawRadio.addEventListener('change', handleModeChange);
+            clearRectsButton.addEventListener('click', clearAllRectangles);
+
+            canvas.addEventListener('pointerdown', handlePointerDown);
+            canvas.addEventListener('pointermove', handlePointerMove);
+            canvas.addEventListener('pointerup', handlePointerUp);
+            canvas.addEventListener('pointerleave', handlePointerUp); // Treat as pointer up
+            canvas.addEventListener('wheel', handleWheel, { passive: false });
+
+            // Load default image on page load
+            if (iiifUrlInput.value) {
+                loadIIIFImage();
+            } else {
+                requestAnimationFrame(drawCanvas); // Draw initial "load image" message
+            }
+        }
+
+        function resizeCanvas() {
+            canvas.width = canvasContainer.clientWidth;
+            canvas.height = canvasContainer.clientHeight;
+            if (iiifInfo) { // If an image is loaded, redraw it
+                setInitialImageView(); // Re-fit image to new canvas size and requests a draw
+            } else {
+                requestAnimationFrame(drawCanvas); // If no image, ensure placeholder is drawn
+            }
+        }
+
+        // --- IIIF Loading and Initial View ---
+        async function loadIIIFImage() {
+            const url = iiifUrlInput.value.trim();
+            if (!url) {
+                alert("Please enter a IIIF Info URL.");
+                return;
+            }
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                iiifInfo = await response.json();
+
+                imageFullWidth = iiifInfo.width;
+                imageFullHeight = iiifInfo.height;
+                tileCache = {}; // Clear cache for new image
+                rectangles.length = 0; // Clear rectangles for new image
+                currentColorIndex = 0; // Reset color index for new image
+                updateCoordsDisplay(); // Clear displayed coordinates
+
+                setInitialImageView(); // This will also request a draw
+
+            } catch (error) {
+                console.error("Failed to load IIIF info:", error);
+                alert(`Failed to load IIIF info: ${error.message}`);
+                iiifInfo = null; // Reset on error
+                requestAnimationFrame(drawCanvas); // Draw placeholder on error
+            }
+        }
+
+        function setInitialImageView() {
+            if (!imageFullWidth || !imageFullHeight || !canvas.width || !canvas.height) return;
+
+            const canvasAspect = canvas.width / canvas.height;
+            const imageAspect = imageFullWidth / imageFullHeight;
+
+            if (imageAspect > canvasAspect) { // Image is wider than canvas container
+                currentScale = canvas.width / imageFullWidth;
+            } else { // Image is taller or same aspect
+                currentScale = canvas.height / imageFullHeight;
+            }
+
+            // Center the image
+            offsetX = (canvas.width - imageFullWidth * currentScale) / 2;
+            offsetY = (canvas.height - imageFullHeight * currentScale) / 2;
+            
+            requestAnimationFrame(drawCanvas);
+        }
+
+        // --- Drawing Logic ---
+        function drawCanvas() {
+            // MODIFICATION: Always clear the canvas first to transparent black.
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (!iiifInfo) {
+                // Fill with a specific background for the "no image" message
+                ctx.fillStyle = "#ccc";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                // Draw the message
+                ctx.fillStyle = "black";
+                ctx.textAlign = "center";
+                ctx.font = "16px sans-serif";
+                ctx.fillText("Load a IIIF image to begin.", canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            // Fill with a specific background for the image viewing area (e.g., white)
+            // This ensures the area outside the image (if it's smaller than canvas) has this color.
+            ctx.fillStyle = "#FFF";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Determine visible region of the full image
+            const viewX = -offsetX / currentScale;
+            const viewY = -offsetY / currentScale;
+            const viewWidth = canvas.width / currentScale;
+            const viewHeight = canvas.height / currentScale;
+
+            const tileInfo = iiifInfo.tiles[0];
+            const scaleFactors = tileInfo.scaleFactors.slice().sort((a, b) => a - b);
+            let chosenSF = scaleFactors[scaleFactors.length - 1];
+            for (const sf of scaleFactors) {
+                if (currentScale * sf >= 0.75) { // Tweaked threshold for slightly earlier high-res tile switch
+                    chosenSF = sf;
+                    break;
+                }
+            }
+            
+            const tileWidthAtChosenLevel = tileInfo.width;
+            const tileHeightAtChosenLevel = tileInfo.height || tileInfo.width;
+
+            const fullImagePixelWidthPerTile = tileWidthAtChosenLevel * chosenSF;
+            const fullImagePixelHeightPerTile = tileHeightAtChosenLevel * chosenSF;
+            
+            const startCol = Math.max(0, Math.floor(viewX / fullImagePixelWidthPerTile));
+            const endCol = Math.min(Math.ceil(imageFullWidth / fullImagePixelWidthPerTile), Math.ceil((viewX + viewWidth) / fullImagePixelWidthPerTile));
+            const startRow = Math.max(0, Math.floor(viewY / fullImagePixelHeightPerTile));
+            const endRow = Math.min(Math.ceil(imageFullHeight / fullImagePixelHeightPerTile), Math.ceil((viewY + viewHeight) / fullImagePixelHeightPerTile));
+
+
+            const imageBaseUrl = iiifInfo['@id'] || iiifInfo.id;
+
+            for (let r = startRow; r < endRow; r++) {
+                for (let c = startCol; c < endCol; c++) {
+                    const tileRegionX = c * fullImagePixelWidthPerTile;
+                    const tileRegionY = r * fullImagePixelHeightPerTile;
+                    let tileRegionW = fullImagePixelWidthPerTile;
+                    let tileRegionH = fullImagePixelHeightPerTile;
+
+                    if (tileRegionX + tileRegionW > imageFullWidth) {
+                        tileRegionW = imageFullWidth - tileRegionX;
+                    }
+                    if (tileRegionY + tileRegionH > imageFullHeight) {
+                        tileRegionH = imageFullHeight - tileRegionY;
+                    }
+                    if (tileRegionW <=0 || tileRegionH <=0) continue;
+
+                    const tileScaledWidth = Math.ceil(tileRegionW / chosenSF);
+                    const tileScaledHeight = Math.ceil(tileRegionH / chosenSF);
+
+                    const tileUrl = `${imageBaseUrl}/${tileRegionX},${tileRegionY},${tileRegionW},${tileRegionH}/${tileScaledWidth},/0/default.jpg`;
+                    const tileKey = tileUrl;
+
+                    const destX = offsetX + tileRegionX * currentScale;
+                    const destY = offsetY + tileRegionY * currentScale;
+                    const destW = tileRegionW * currentScale;
+                    const destH = tileRegionH * currentScale;
+                    
+                    if (destX + destW < 0 || destX > canvas.width || destY + destH < 0 || destY > canvas.height) {
+                        continue;
+                    }
+
+                    if (tileCache[tileKey] && tileCache[tileKey].complete && tileCache[tileKey].naturalHeight !== 0) {
+                        ctx.drawImage(tileCache[tileKey], destX, destY, destW, destH);
+                    } else if (!tileCache[tileKey] || (tileCache[tileKey] && tileCache[tileKey].errored)) { // Don't retry errored tiles immediately
+                        if (tileCache[tileKey] && tileCache[tileKey].errored) {
+                            // Optionally draw placeholder for known errored tiles
+                            // ctx.fillStyle = 'lightgray'; ctx.fillRect(destX, destY, destW, destH);
+                        } else {
+                            const img = new Image();
+                            img.src = tileUrl;
+                            tileCache[tileKey] = img; 
+                            img.onload = () => {
+                                requestAnimationFrame(drawCanvas); 
+                            };
+                            img.onerror = () => {
+                                console.warn("Error loading tile:", tileUrl);
+                                tileCache[tileKey].errored = true; // Mark as errored
+                                // Optionally draw a placeholder for failed tiles
+                                requestAnimationFrame(drawCanvas); // Redraw to show error or just move on
+                            };
+                        }
+                    }
+                    // If tile is in cache but not loaded yet, onload will trigger redraw.
+                }
+            }
+
+            // --- Draw Rectangles ---
+            rectangles.forEach(rect => {
+                ctx.fillStyle = rect.color;
+                const rx = offsetX + rect.x * imageFullWidth * currentScale;
+                const ry = offsetY + rect.y * imageFullHeight * currentScale;
+                const rw = rect.w * imageFullWidth * currentScale;
+                const rh = rect.h * imageFullHeight * currentScale;
+                ctx.fillRect(rx, ry, rw, rh);
+            });
+
+            // --- Draw current drawing rectangle (if any) ---
+            if (isPointerDown && activeMode === 'draw' && currentDrawingRect) {
+                ctx.fillStyle = RECT_COLORS[currentColorIndex % RECT_COLORS.length];
+                ctx.globalAlpha = 0.7;
+                const drx = offsetX + currentDrawingRect.x * imageFullWidth * currentScale;
+                const dry = offsetY + currentDrawingRect.y * imageFullHeight * currentScale;
+                const drw = currentDrawingRect.w * imageFullWidth * currentScale;
+                const drh = currentDrawingRect.h * imageFullHeight * currentScale;
+                ctx.fillRect(drx, dry, drw, drh);
+                ctx.globalAlpha = 1.0; // Reset globalAlpha
+            }
+        }
+
+        // --- Event Handlers ---
+        function handleModeChange(event) {
+            activeMode = event.target.value;
+            canvas.style.cursor = activeMode === 'pan' ? 'grab' : 'crosshair';
+        }
+
+        function handlePointerDown(event) {
+            event.preventDefault(); // Prevent text selection, etc.
+            canvas.focus(); // Ensure canvas has focus for keyboard events if any were added
+            isPointerDown = true;
+            lastPointerX = event.clientX;
+            lastPointerY = event.clientY;
+
+            if (activeMode === 'pan') {
+                canvas.style.cursor = 'grabbing';
+            } else if (activeMode === 'draw') {
+                const rect = canvas.getBoundingClientRect();
+                const canvasX = event.clientX - rect.left;
+                const canvasY = event.clientY - rect.top;
+
+                // Convert canvas click coords to full image coords (unscaled)
+                const imageX = (canvasX - offsetX) / currentScale;
+                const imageY = (canvasY - offsetY) / currentScale;
+
+                // Clamp to image boundaries (0 to imageFullWidth/Height)
+                drawStartX = Math.max(0, Math.min(imageX, imageFullWidth));
+                drawStartY = Math.max(0, Math.min(imageY, imageFullHeight));
+
+                currentDrawingRect = { 
+                    x: drawStartX / imageFullWidth,
+                    y: drawStartY / imageFullHeight,
+                    w: 0,
+                    h: 0
+                };
+            }
+        }
+
+        function handlePointerMove(event) {
+            if (!isPointerDown || !iiifInfo) return;
+            // event.preventDefault(); // Can sometimes interfere with scrolling if canvas is small
+
+            const dx = event.clientX - lastPointerX;
+            const dy = event.clientY - lastPointerY;
+
+            if (activeMode === 'pan') {
+                offsetX += dx;
+                offsetY += dy;
+                requestAnimationFrame(drawCanvas);
+            } else if (activeMode === 'draw' && currentDrawingRect) { // Ensure currentDrawingRect exists
+                const rect = canvas.getBoundingClientRect();
+                const canvasX = event.clientX - rect.left;
+                const canvasY = event.clientY - rect.top;
+
+                let currentImgX = (canvasX - offsetX) / currentScale;
+                let currentImgY = (canvasY - offsetY) / currentScale;
+
+                // Clamp current drawing point to image boundaries
+                currentImgX = Math.max(0, Math.min(currentImgX, imageFullWidth));
+                currentImgY = Math.max(0, Math.min(currentImgY, imageFullHeight));
+                
+                const newRectX = Math.min(drawStartX, currentImgX);
+                const newRectY = Math.min(drawStartY, currentImgY);
+                const newRectW = Math.abs(currentImgX - drawStartX);
+                const newRectH = Math.abs(currentImgY - drawStartY);
+
+                currentDrawingRect = {
+                    x: newRectX / imageFullWidth,
+                    y: newRectY / imageFullHeight,
+                    w: newRectW / imageFullWidth,
+                    h: newRectH / imageFullHeight
+                };
+                requestAnimationFrame(drawCanvas);
+            }
+
+            lastPointerX = event.clientX;
+            lastPointerY = event.clientY;
+        }
+
+        function handlePointerUp(event) {
+            if (!isPointerDown) return;
+            isPointerDown = false;
+            // event.preventDefault();
+
+            if (activeMode === 'pan') {
+                canvas.style.cursor = 'grab';
+            } else if (activeMode === 'draw' && currentDrawingRect ) {
+                 // Finalize rectangle
+                if (currentDrawingRect.w > 1e-5 && currentDrawingRect.h > 1e-5) { // Check for minimal size
+                    const finalRect = {
+                        x: currentDrawingRect.x,
+                        y: currentDrawingRect.y,
+                        w: currentDrawingRect.w,
+                        h: currentDrawingRect.h,
+                        color: RECT_COLORS[currentColorIndex % RECT_COLORS.length]
+                    };
+                    // Ensure width/height don't make it go out of 0-1 bounds from x,y
+                    if (finalRect.x + finalRect.w > 1) finalRect.w = 1 - finalRect.x;
+                    if (finalRect.y + finalRect.h > 1) finalRect.h = 1 - finalRect.y;
+
+                    if(finalRect.w > 1e-5 && finalRect.h > 1e-5) { // Re-check after clamping
+                        rectangles.push(finalRect);
+                        currentColorIndex++;
+                        updateCoordsDisplay();
+                        copyRectsToClipboard();
+                    }
+                }
+            }
+            currentDrawingRect = null; // Reset drawing rect
+            requestAnimationFrame(drawCanvas); // Redraw to remove temporary drawing rect
+        }
+
+        function handleWheel(event) {
+            if (!iiifInfo) return;
+            event.preventDefault(); // Prevent page scroll
+
+            const zoomIntensity = 0.1;
+            const delta = event.deltaY < 0 ? (1 + zoomIntensity) : (1 / (1 + zoomIntensity)); // Multiplicative zoom
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left; 
+            const mouseY = event.clientY - rect.top;  
+
+            const BZX = (mouseX - offsetX) / currentScale;
+            const BZY = (mouseY - offsetY) / currentScale;
+
+            const prevScale = currentScale;
+            currentScale *= delta;
+            
+            // Define minScale based on fitting the image into a small portion of the canvas (e.g. 1/16th area)
+            const minFitScale = Math.min(canvas.width / imageFullWidth, canvas.height / imageFullHeight);
+            const minScale = minFitScale / 4; // Allow zooming out 4x from initial fit
+
+            // Define maxScale based on native resolution (SF=1) being shown at e.g. 4x magnification on screen
+            // Assuming scaleFactors[0] is the highest resolution (typically 1)
+            const highestResSF = (iiifInfo.tiles && iiifInfo.tiles[0] && iiifInfo.tiles[0].scaleFactors.length > 0) ?
+                                 Math.min(...iiifInfo.tiles[0].scaleFactors) : 1;
+            const maxScale = (1 / highestResSF) * 4; // e.g. 4x pixel native resolution
+
+            currentScale = Math.max(minScale, Math.min(currentScale, maxScale));
+
+            if (currentScale !== prevScale) { // Only update if scale actually changed
+                offsetX = mouseX - BZX * currentScale;
+                offsetY = mouseY - BZY * currentScale;
+                requestAnimationFrame(drawCanvas);
+            }
+        }
+
+        // --- Rectangle Management ---
+        function clearAllRectangles() {
+            rectangles.length = 0; 
+            currentColorIndex = 0;
+            updateCoordsDisplay();
+            if(iiifInfo) requestAnimationFrame(drawCanvas); // Redraw if image loaded
+        }
+
+        function updateCoordsDisplay() {
+            coordsOutput.textContent = rectangles.map(r =>
+                `${r.x.toFixed(4)}, ${r.y.toFixed(4)}, ${r.w.toFixed(4)}, ${r.h.toFixed(4)}`
+            ).join('\n');
+        }
+
+        function copyRectsToClipboard() {
+            if (rectangles.length === 0) return; // Don't copy if no rectangles
+            const textToCopy = rectangles.map(r =>
+                `${r.x.toFixed(6)},${r.y.toFixed(6)},${r.w.toFixed(6)},${r.h.toFixed(6)}`
+            ).join('\n');
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(textToCopy)
+                    .then(() => { /* console.log("Rects copied."); */ })
+                    .catch(err => { console.warn("Failed to copy to clipboard:", err); });
+            } else {
+                console.warn("Clipboard API not available.");
+            }
+        }
+
+        // --- Start the application ---
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+
+
+
+							<script>
+                            	        function drawCanvas() {
+            // MODIFICATION: Always clear the canvas first to transparent black.
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (!iiifInfo) {
+                // Fill with a specific background for the "no image" message
+                ctx.fillStyle = "#ccc";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                // Draw the message
+                ctx.fillStyle = "black";
+                ctx.textAlign = "center";
+                ctx.font = "16px sans-serif"; // Added font for clarity
+                ctx.fillText("Load a IIIF image to begin.", canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            // Fill with a specific background for the image viewing area (e.g., white)
+            // This ensures the area outside the image (if it's smaller than canvas) has this color.
+            ctx.fillStyle = "#FFF";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // ... rest of the drawing logic ...
+        }
+
+
+        // --- Global-like state variables (declared in this top-level script scope) ---
+        let iiifInfo = null;
+        let imageFullWidth = 0;
+        let imageFullHeight = 0;
+        let currentScale = 1.0; // Zoom level of the full image
+        let offsetX = 0; // Pan X: top-left of image relative to canvas top-left
+        let offsetY = 0; // Pan Y
+        const rectangles = []; // Stores {x, y, w, h (percentage), color}
+        let currentColorIndex = 0;
+        const RECT_COLORS = [
+            'rgba(255, 0, 0, 0.4)',   // Red
+            'rgba(0, 255, 0, 0.4)',   // Green
+            'rgba(0, 0, 255, 0.4)',   // Blue
+            'rgba(255, 255, 0, 0.4)', // Yellow
+            'rgba(255, 0, 255, 0.4)', // Magenta
+            'rgba(0, 255, 255, 0.4)'  // Cyan
+        ];
+        let tileCache = {}; // Cache for loaded image tiles: { tileKey: ImageElement }
+
+        // --- Interaction State ---
+        let activeMode = 'pan'; // 'pan' or 'draw'
+        let isPointerDown = false;
+        let lastPointerX = 0;
+        let lastPointerY = 0;
+        let drawStartX = 0, drawStartY = 0; // In image coordinates for current rect
+        let currentDrawingRect = null; // {x, y, w, h} in image percentage coordinates
+
+        // --- DOM Elements ---
+        const canvas = document.getElementById('iiifCanvas');
+        const ctx = canvas.getContext('2d');
+        const iiifUrlInput = document.getElementById('iiifUrl');
+        const loadButton = document.getElementById('loadIiif');
+        const modePanRadio = document.getElementById('modePan');
+        const modeDrawRadio = document.getElementById('modeDraw');
+        const clearRectsButton = document.getElementById('clearRects');
+        const coordsOutput = document.getElementById('coordsOutput');
+        const canvasContainer = document.getElementById('canvasContainer');
+
+        // --- Initialization ---
+        function init() {
+            resizeCanvas();
+            window.addEventListener('resize', () => {
+                resizeCanvas();
+                // No need to explicitly call drawCanvas here if image is loaded,
+                // setInitialImageView will handle it via resizeCanvas.
+                // If no image, drawCanvas will show the placeholder.
+                if (!iiifInfo) requestAnimationFrame(drawCanvas);
+            });
+
+            loadButton.addEventListener('click', loadIIIFImage);
+            modePanRadio.addEventListener('change', handleModeChange);
+            modeDrawRadio.addEventListener('change', handleModeChange);
+            clearRectsButton.addEventListener('click', clearAllRectangles);
+
+            canvas.addEventListener('pointerdown', handlePointerDown);
+            canvas.addEventListener('pointermove', handlePointerMove);
+            canvas.addEventListener('pointerup', handlePointerUp);
+            canvas.addEventListener('pointerleave', handlePointerUp); // Treat as pointer up
+            canvas.addEventListener('wheel', handleWheel, { passive: false });
+
+            // Load default image on page load
+            if (iiifUrlInput.value) {
+                loadIIIFImage();
+            } else {
+                requestAnimationFrame(drawCanvas); // Draw initial "load image" message
+            }
+        }
+
+        function resizeCanvas() {
+            canvas.width = canvasContainer.clientWidth;
+            canvas.height = canvasContainer.clientHeight;
+            if (iiifInfo) { // If an image is loaded, redraw it
+                setInitialImageView(); // Re-fit image to new canvas size and requests a draw
+            } else {
+                requestAnimationFrame(drawCanvas); // If no image, ensure placeholder is drawn
+            }
+        }
+
+        // --- IIIF Loading and Initial View ---
+        async function loadIIIFImage() {
+            const url = iiifUrlInput.value.trim();
+            if (!url) {
+                alert("Please enter a IIIF Info URL.");
+                return;
+            }
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                iiifInfo = await response.json();
+
+                imageFullWidth = iiifInfo.width;
+                imageFullHeight = iiifInfo.height;
+                tileCache = {}; // Clear cache for new image
+                rectangles.length = 0; // Clear rectangles for new image
+                currentColorIndex = 0; // Reset color index for new image
+                updateCoordsDisplay(); // Clear displayed coordinates
+
+                setInitialImageView(); // This will also request a draw
+
+            } catch (error) {
+                console.error("Failed to load IIIF info:", error);
+                alert(`Failed to load IIIF info: ${error.message}`);
+                iiifInfo = null; // Reset on error
+                requestAnimationFrame(drawCanvas); // Draw placeholder on error
+            }
+        }
+
+        function setInitialImageView() {
+            if (!imageFullWidth || !imageFullHeight || !canvas.width || !canvas.height) return;
+
+            const canvasAspect = canvas.width / canvas.height;
+            const imageAspect = imageFullWidth / imageFullHeight;
+
+            if (imageAspect > canvasAspect) { // Image is wider than canvas container
+                currentScale = canvas.width / imageFullWidth;
+            } else { // Image is taller or same aspect
+                currentScale = canvas.height / imageFullHeight;
+            }
+
+            // Center the image
+            offsetX = (canvas.width - imageFullWidth * currentScale) / 2;
+            offsetY = (canvas.height - imageFullHeight * currentScale) / 2;
+            
+            requestAnimationFrame(drawCanvas);
+        }
+
+        // --- Drawing Logic ---
+        function drawCanvas() {
+            // MODIFICATION: Always clear the canvas first to transparent black.
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (!iiifInfo) {
+                // Fill with a specific background for the "no image" message
+                ctx.fillStyle = "#ccc";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                // Draw the message
+                ctx.fillStyle = "black";
+                ctx.textAlign = "center";
+                ctx.font = "16px sans-serif";
+                ctx.fillText("Load a IIIF image to begin.", canvas.width / 2, canvas.height / 2);
+                return;
+            }
+
+            // Fill with a specific background for the image viewing area (e.g., white)
+            // This ensures the area outside the image (if it's smaller than canvas) has this color.
+            ctx.fillStyle = "#FFF";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Determine visible region of the full image
+            const viewX = -offsetX / currentScale;
+            const viewY = -offsetY / currentScale;
+            const viewWidth = canvas.width / currentScale;
+            const viewHeight = canvas.height / currentScale;
+
+            const tileInfo = iiifInfo.tiles[0];
+            const scaleFactors = tileInfo.scaleFactors.slice().sort((a, b) => a - b);
+            let chosenSF = scaleFactors[scaleFactors.length - 1];
+            for (const sf of scaleFactors) {
+                if (currentScale * sf >= 0.75) { // Tweaked threshold for slightly earlier high-res tile switch
+                    chosenSF = sf;
+                    break;
+                }
+            }
+            
+            const tileWidthAtChosenLevel = tileInfo.width;
+            const tileHeightAtChosenLevel = tileInfo.height || tileInfo.width;
+
+            const fullImagePixelWidthPerTile = tileWidthAtChosenLevel * chosenSF;
+            const fullImagePixelHeightPerTile = tileHeightAtChosenLevel * chosenSF;
+            
+            const startCol = Math.max(0, Math.floor(viewX / fullImagePixelWidthPerTile));
+            const endCol = Math.min(Math.ceil(imageFullWidth / fullImagePixelWidthPerTile), Math.ceil((viewX + viewWidth) / fullImagePixelWidthPerTile));
+            const startRow = Math.max(0, Math.floor(viewY / fullImagePixelHeightPerTile));
+            const endRow = Math.min(Math.ceil(imageFullHeight / fullImagePixelHeightPerTile), Math.ceil((viewY + viewHeight) / fullImagePixelHeightPerTile));
+
+
+            const imageBaseUrl = iiifInfo['@id'] || iiifInfo.id;
+
+            for (let r = startRow; r < endRow; r++) {
+                for (let c = startCol; c < endCol; c++) {
+                    const tileRegionX = c * fullImagePixelWidthPerTile;
+                    const tileRegionY = r * fullImagePixelHeightPerTile;
+                    let tileRegionW = fullImagePixelWidthPerTile;
+                    let tileRegionH = fullImagePixelHeightPerTile;
+
+                    if (tileRegionX + tileRegionW > imageFullWidth) {
+                        tileRegionW = imageFullWidth - tileRegionX;
+                    }
+                    if (tileRegionY + tileRegionH > imageFullHeight) {
+                        tileRegionH = imageFullHeight - tileRegionY;
+                    }
+                    if (tileRegionW <=0 || tileRegionH <=0) continue;
+
+                    const tileScaledWidth = Math.ceil(tileRegionW / chosenSF);
+                    const tileScaledHeight = Math.ceil(tileRegionH / chosenSF);
+
+                    const tileUrl = `${imageBaseUrl}/${tileRegionX},${tileRegionY},${tileRegionW},${tileRegionH}/${tileScaledWidth},/0/default.jpg`;
+                    const tileKey = tileUrl;
+
+                    const destX = offsetX + tileRegionX * currentScale;
+                    const destY = offsetY + tileRegionY * currentScale;
+                    const destW = tileRegionW * currentScale;
+                    const destH = tileRegionH * currentScale;
+                    
+                    if (destX + destW < 0 || destX > canvas.width || destY + destH < 0 || destY > canvas.height) {
+                        continue;
+                    }
+
+                    if (tileCache[tileKey] && tileCache[tileKey].complete && tileCache[tileKey].naturalHeight !== 0) {
+                        ctx.drawImage(tileCache[tileKey], destX, destY, destW, destH);
+                    } else if (!tileCache[tileKey] || (tileCache[tileKey] && tileCache[tileKey].errored)) { // Don't retry errored tiles immediately
+                        if (tileCache[tileKey] && tileCache[tileKey].errored) {
+                            // Optionally draw placeholder for known errored tiles
+                            // ctx.fillStyle = 'lightgray'; ctx.fillRect(destX, destY, destW, destH);
+                        } else {
+                            const img = new Image();
+                            img.src = tileUrl;
+                            tileCache[tileKey] = img; 
+                            img.onload = () => {
+                                requestAnimationFrame(drawCanvas); 
+                            };
+                            img.onerror = () => {
+                                console.warn("Error loading tile:", tileUrl);
+                                tileCache[tileKey].errored = true; // Mark as errored
+                                // Optionally draw a placeholder for failed tiles
+                                requestAnimationFrame(drawCanvas); // Redraw to show error or just move on
+                            };
+                        }
+                    }
+                    // If tile is in cache but not loaded yet, onload will trigger redraw.
+                }
+            }
+
+            // --- Draw Rectangles ---
+            rectangles.forEach(rect => {
+                ctx.fillStyle = rect.color;
+                const rx = offsetX + rect.x * imageFullWidth * currentScale;
+                const ry = offsetY + rect.y * imageFullHeight * currentScale;
+                const rw = rect.w * imageFullWidth * currentScale;
+                const rh = rect.h * imageFullHeight * currentScale;
+                ctx.fillRect(rx, ry, rw, rh);
+            });
+
+            // --- Draw current drawing rectangle (if any) ---
+            if (isPointerDown && activeMode === 'draw' && currentDrawingRect) {
+                ctx.fillStyle = RECT_COLORS[currentColorIndex % RECT_COLORS.length];
+                ctx.globalAlpha = 0.7;
+                const drx = offsetX + currentDrawingRect.x * imageFullWidth * currentScale;
+                const dry = offsetY + currentDrawingRect.y * imageFullHeight * currentScale;
+                const drw = currentDrawingRect.w * imageFullWidth * currentScale;
+                const drh = currentDrawingRect.h * imageFullHeight * currentScale;
+                ctx.fillRect(drx, dry, drw, drh);
+                ctx.globalAlpha = 1.0; // Reset globalAlpha
+            }
+        }
+
+        // --- Event Handlers ---
+        function handleModeChange(event) {
+            activeMode = event.target.value;
+            canvas.style.cursor = activeMode === 'pan' ? 'grab' : 'crosshair';
+        }
+
+        function handlePointerDown(event) {
+            event.preventDefault(); // Prevent text selection, etc.
+            canvas.focus(); // Ensure canvas has focus for keyboard events if any were added
+            isPointerDown = true;
+            lastPointerX = event.clientX;
+            lastPointerY = event.clientY;
+
+            if (activeMode === 'pan') {
+                canvas.style.cursor = 'grabbing';
+            } else if (activeMode === 'draw') {
+                const rect = canvas.getBoundingClientRect();
+                const canvasX = event.clientX - rect.left;
+                const canvasY = event.clientY - rect.top;
+
+                // Convert canvas click coords to full image coords (unscaled)
+                const imageX = (canvasX - offsetX) / currentScale;
+                const imageY = (canvasY - offsetY) / currentScale;
+
+                // Clamp to image boundaries (0 to imageFullWidth/Height)
+                drawStartX = Math.max(0, Math.min(imageX, imageFullWidth));
+                drawStartY = Math.max(0, Math.min(imageY, imageFullHeight));
+
+                currentDrawingRect = { 
+                    x: drawStartX / imageFullWidth,
+                    y: drawStartY / imageFullHeight,
+                    w: 0,
+                    h: 0
+                };
+            }
+        }
+
+        function handlePointerMove(event) {
+            if (!isPointerDown || !iiifInfo) return;
+            // event.preventDefault(); // Can sometimes interfere with scrolling if canvas is small
+
+            const dx = event.clientX - lastPointerX;
+            const dy = event.clientY - lastPointerY;
+
+            if (activeMode === 'pan') {
+                offsetX += dx;
+                offsetY += dy;
+                requestAnimationFrame(drawCanvas);
+            } else if (activeMode === 'draw' && currentDrawingRect) { // Ensure currentDrawingRect exists
+                const rect = canvas.getBoundingClientRect();
+                const canvasX = event.clientX - rect.left;
+                const canvasY = event.clientY - rect.top;
+
+                let currentImgX = (canvasX - offsetX) / currentScale;
+                let currentImgY = (canvasY - offsetY) / currentScale;
+
+                // Clamp current drawing point to image boundaries
+                currentImgX = Math.max(0, Math.min(currentImgX, imageFullWidth));
+                currentImgY = Math.max(0, Math.min(currentImgY, imageFullHeight));
+                
+                const newRectX = Math.min(drawStartX, currentImgX);
+                const newRectY = Math.min(drawStartY, currentImgY);
+                const newRectW = Math.abs(currentImgX - drawStartX);
+                const newRectH = Math.abs(currentImgY - drawStartY);
+
+                currentDrawingRect = {
+                    x: newRectX / imageFullWidth,
+                    y: newRectY / imageFullHeight,
+                    w: newRectW / imageFullWidth,
+                    h: newRectH / imageFullHeight
+                };
+                requestAnimationFrame(drawCanvas);
+            }
+
+            lastPointerX = event.clientX;
+            lastPointerY = event.clientY;
+        }
+
+        function handlePointerUp(event) {
+            if (!isPointerDown) return;
+            isPointerDown = false;
+            // event.preventDefault();
+
+            if (activeMode === 'pan') {
+                canvas.style.cursor = 'grab';
+            } else if (activeMode === 'draw' && currentDrawingRect ) {
+                 // Finalize rectangle
+                if (currentDrawingRect.w > 1e-5 && currentDrawingRect.h > 1e-5) { // Check for minimal size
+                    const finalRect = {
+                        x: currentDrawingRect.x,
+                        y: currentDrawingRect.y,
+                        w: currentDrawingRect.w,
+                        h: currentDrawingRect.h,
+                        color: RECT_COLORS[currentColorIndex % RECT_COLORS.length]
+                    };
+                    // Ensure width/height don't make it go out of 0-1 bounds from x,y
+                    if (finalRect.x + finalRect.w > 1) finalRect.w = 1 - finalRect.x;
+                    if (finalRect.y + finalRect.h > 1) finalRect.h = 1 - finalRect.y;
+
+                    if(finalRect.w > 1e-5 && finalRect.h > 1e-5) { // Re-check after clamping
+                        rectangles.push(finalRect);
+                        currentColorIndex++;
+                        updateCoordsDisplay();
+                        copyRectsToClipboard();
+                    }
+                }
+            }
+            currentDrawingRect = null; // Reset drawing rect
+            requestAnimationFrame(drawCanvas); // Redraw to remove temporary drawing rect
+        }
+
+        function handleWheel(event) {
+            if (!iiifInfo) return;
+            event.preventDefault(); // Prevent page scroll
+
+            const zoomIntensity = 0.1;
+            const delta = event.deltaY < 0 ? (1 + zoomIntensity) : (1 / (1 + zoomIntensity)); // Multiplicative zoom
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left; 
+            const mouseY = event.clientY - rect.top;  
+
+            const BZX = (mouseX - offsetX) / currentScale;
+            const BZY = (mouseY - offsetY) / currentScale;
+
+            const prevScale = currentScale;
+            currentScale *= delta;
+            
+            // Define minScale based on fitting the image into a small portion of the canvas (e.g. 1/16th area)
+            const minFitScale = Math.min(canvas.width / imageFullWidth, canvas.height / imageFullHeight);
+            const minScale = minFitScale / 4; // Allow zooming out 4x from initial fit
+
+            // Define maxScale based on native resolution (SF=1) being shown at e.g. 4x magnification on screen
+            // Assuming scaleFactors[0] is the highest resolution (typically 1)
+            const highestResSF = (iiifInfo.tiles && iiifInfo.tiles[0] && iiifInfo.tiles[0].scaleFactors.length > 0) ?
+                                 Math.min(...iiifInfo.tiles[0].scaleFactors) : 1;
+            const maxScale = (1 / highestResSF) * 4; // e.g. 4x pixel native resolution
+
+            currentScale = Math.max(minScale, Math.min(currentScale, maxScale));
+
+            if (currentScale !== prevScale) { // Only update if scale actually changed
+                offsetX = mouseX - BZX * currentScale;
+                offsetY = mouseY - BZY * currentScale;
+                requestAnimationFrame(drawCanvas);
+            }
+        }
+
+        // --- Rectangle Management ---
+        function clearAllRectangles() {
+            rectangles.length = 0; 
+            currentColorIndex = 0;
+            updateCoordsDisplay();
+            if(iiifInfo) requestAnimationFrame(drawCanvas); // Redraw if image loaded
+        }
+
+        function updateCoordsDisplay() {
+            coordsOutput.textContent = rectangles.map(r =>
+                `${r.x.toFixed(4)}, ${r.y.toFixed(4)}, ${r.w.toFixed(4)}, ${r.h.toFixed(4)}`
+            ).join('\n');
+        }
+
+        function copyRectsToClipboard() {
+            if (rectangles.length === 0) return; // Don't copy if no rectangles
+            const textToCopy = rectangles.map(r =>
+                `${r.x.toFixed(6)},${r.y.toFixed(6)},${r.w.toFixed(6)},${r.h.toFixed(6)}`
+            ).join('\n');
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(textToCopy)
+                    .then(() => { /* console.log("Rects copied."); */ })
+                    .catch(err => { console.warn("Failed to copy to clipboard:", err); });
+            } else {
+                console.warn("Clipboard API not available.");
+            }
+        }
+
+        // --- Start the application ---
+        document.addEventListener('DOMContentLoaded', init);
+    
+
+							</script>
+                        </body>
+                        </html>
+                    

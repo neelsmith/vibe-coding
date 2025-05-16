@@ -1,0 +1,1025 @@
+
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body {
+									background-color: white; /* Ensure the iframe has a white background */
+								}
+
+								
+        body { margin: 0; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; }
+        #controls { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; gap: 10px; align-items: center; }
+        #controls label, #controls input, #controls button, #controls select { margin-right: 10px; }
+        #viewer-container { flex-grow: 1; position: relative; overflow: hidden; background-color: #ddd; display: flex; justify-content: center; align-items: center;}
+        #imageCanvas { border: 1px solid black; cursor: grab; }
+        #coords-display { margin-top: 10px; padding: 10px; background-color: #eee; max-height: 150px; overflow-y: auto; white-space: pre; font-family: monospace;}
+        .loading-spinner {
+            border: 5px solid #f3f3f3; /* Light grey */
+            border-top: 5px solid #3498db; /* Blue */
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            position: absolute; /* To center it within viewer-container */
+            display: none; /* Hidden by default */
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    
+
+							</style>
+                        </head>
+                        <body>
+                            <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scratch IIIF Viewer</title>
+    <style>
+        body { margin: 0; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; }
+        #controls { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; gap: 10px; align-items: center; }
+        #controls label, #controls input, #controls button, #controls select { margin-right: 10px; }
+        #viewer-container { flex-grow: 1; position: relative; overflow: hidden; background-color: #ddd; display: flex; justify-content: center; align-items: center;}
+        #imageCanvas { border: 1px solid black; cursor: grab; }
+        #coords-display { margin-top: 10px; padding: 10px; background-color: #eee; max-height: 150px; overflow-y: auto; white-space: pre; font-family: monospace;}
+        .loading-spinner {
+            border: 5px solid #f3f3f3; /* Light grey */
+            border-top: 5px solid #3498db; /* Blue */
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            position: absolute; /* To center it within viewer-container */
+            display: none; /* Hidden by default */
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="controls">
+        <label for="iiif-url">IIIF Info URL:</label>
+        <input type="text" id="iiif-url" style="flex-grow:1;" value="http://www.homermultitext.org/iipsrv?IIIF=/project/homer/pyramidal/deepzoom/hmt/vaimg/2017a/VA012RN_0013.tif/info.json">
+        <button id="load-image">Load Image</button>
+        <span>Mode:</span>
+        <label><input type="radio" name="mode" value="panzoom" checked> Pan/Zoom</label>
+        <label><input type="radio" name="mode" value="draw"> Draw Rectangle</label>
+    </div>
+
+    <div id="viewer-container">
+        <canvas id="imageCanvas"></canvas>
+        <div id="loading-spinner" class="loading-spinner"></div>
+    </div>
+    
+    <div id="coords-display">Rectangle Coordinates (x,y,w,h - % of image):</div>
+
+    <script>
+        const canvas = document.getElementById('imageCanvas');
+        const ctx = canvas.getContext('2d');
+        const iiifUrlInput = document.getElementById('iiif-url');
+        const loadImageButton = document.getElementById('load-image');
+        const modeRadios = document.querySelectorAll('input[name="mode"]');
+        const coordsDisplay = document.getElementById('coords-display');
+        const viewerContainer = document.getElementById('viewer-container');
+        const loadingSpinner = document.getElementById('loading-spinner');
+
+        // --- Global state for image and view ---
+        let imageInfo = null;
+        let fullImageWidth = 0;
+        let fullImageHeight = 0;
+        let currentScale = 1.0;
+        let offsetX = 0; // Top-left of image relative to canvas top-left
+        let offsetY = 0;
+
+        // --- Pan/Zoom State ---
+        let isPanning = false;
+        let lastPanX, lastPanY;
+        const ZOOM_SENSITIVITY = 0.001;
+
+        // --- Drawing State ---
+        let isDrawingRect = false;
+        let rectStartX, rectStartY; // Canvas coordinates
+        
+        // --- Rectangle Data (GLOBAL - Exercise special care not to redefine) ---
+        let drawnRectangles = []; // Stores {x, y, width, height} in IMAGE coordinates (0-1.0)
+        const RECT_COLORS = [
+            'rgba(255, 0, 0, 0.3)',   // Red
+            'rgba(0, 255, 0, 0.3)',   // Green
+            'rgba(0, 0, 255, 0.3)',   // Blue
+            'rgba(255, 255, 0, 0.3)', // Yellow
+            'rgba(255, 0, 255, 0.3)', // Magenta
+            'rgba(0, 255, 255, 0.3)'  // Cyan
+        ];
+        let nextRectColorIndex = 0;
+
+        // --- Tile Cache ---
+        let tileCache = {};
+        let activeTileRequests = new Set();
+
+        function showLoading(show) {
+            loadingSpinner.style.display = show ? 'block' : 'none';
+        }
+
+        async function fetchImageInfo(url) {
+            showLoading(true);
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                imageInfo = await response.json();
+                fullImageWidth = imageInfo.width;
+                fullImageHeight = imageInfo.height;
+                
+                // Reset state for new image
+                drawnRectangles = []; 
+                nextRectColorIndex = 0;
+                tileCache = {};
+                updateCoordsDisplay();
+
+                fitImageToCanvas();
+                return true;
+            } catch (error) {
+                console.error("Failed to load IIIF info:", error);
+                alert("Error loading IIIF info: " + error.message);
+                imageInfo = null;
+                return false;
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function fitImageToCanvas() {
+            if (!imageInfo) return;
+
+            // Resize canvas to fit container, then fit image to canvas
+            const containerRect = viewerContainer.getBoundingClientRect();
+            canvas.width = containerRect.width -2; // -2 for border
+            canvas.height = containerRect.height -2;
+
+            const scaleX = canvas.width / fullImageWidth;
+            const scaleY = canvas.height / fullImageHeight;
+            currentScale = Math.min(scaleX, scaleY);
+
+            // Center the image
+            offsetX = (canvas.width - fullImageWidth * currentScale) / 2;
+            offsetY = (canvas.height - fullImageHeight * currentScale) / 2;
+            
+            requestRedraw();
+        }
+        
+        function getBestTileLevel() {
+            if (!imageInfo || !imageInfo.tiles || !imageInfo.tiles[0] || !imageInfo.tiles[0].scaleFactors) {
+                // Fallback if no scaleFactors - assume single tile size or try to derive
+                return { levelScaleFactor: 1, tileWidth: imageInfo.tiles?.[0]?.width || 256, tileHeight: imageInfo.tiles?.[0]?.height || 256 };
+            }
+        
+            const targetResolution = 1 / currentScale; // Image pixels per screen pixel desired for tiles
+            const scaleFactors = imageInfo.tiles[0].scaleFactors;
+            let bestLevelIndex = 0;
+            let minDiff = Infinity;
+        
+            // Find the scaleFactor that results in tiles being rendered closest to 1:1 on screen
+            // A scaleFactor in IIIF info means 1 / (level's downsampling factor from full res)
+            // e.g. scaleFactor 1 is full res, 2 is half res (image is 1/2 size), 4 is quarter res (image is 1/4 size)
+            // So, if currentScale makes image pixels small on screen, we want a smaller scaleFactor (higher res level)
+            // If currentScale makes image pixels large on screen, we want a larger scaleFactor (lower res level)
+            
+            // Let's rephrase: We want tile_pixel_size_on_screen to be close to tile_native_pixel_size
+            // tile_pixel_size_on_screen = (native_tile_width_at_level / scale_factor_for_level) * currentScale
+            // The `scaleFactors` array from IIIF info is actually `1 / downsample_factor`.
+            // So, a `scaleFactor` of 4 means the image at this level is 1/4th the full resolution.
+            // We want `currentScale / level_scale_factor` to be close to 1.
+            // i.e., `level_scale_factor` close to `currentScale`.
+
+            for (let i = 0; i < scaleFactors.length; i++) {
+                const levelScale = 1 / scaleFactors[i]; // This is how much bigger a pixel at this level is compared to a full-res pixel
+                                                        // e.g. for scaleFactor 4 (1/4 res), levelScale is 4.
+                const diff = Math.abs(levelScale - (1/currentScale));
+
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    bestLevelIndex = i;
+                }
+                // Prefer slightly over-sampling
+                if (levelScale >= (1/currentScale) && diff < (minDiff + 0.1)) { // Heuristic
+                     minDiff = diff;
+                     bestLevelIndex = i;
+                }
+            }
+            
+            const chosenScaleFactor = scaleFactors[bestLevelIndex]; // This is the factor to apply to full res dims
+            const tileWidth = imageInfo.tiles[0].width; // Assuming consistent tile width
+            const tileHeight = imageInfo.tiles[0].height || tileWidth;
+
+            return {
+                levelIndex: bestLevelIndex,
+                levelScaleFactor: chosenScaleFactor, // e.g., 1, 2, 4, 8 (how much the image is downscaled at this level)
+                tileWidth: tileWidth, // physical tile dimension at this level
+                tileHeight: tileHeight // physical tile dimension at this level
+            };
+        }
+
+
+        async function drawScene() {
+            if (!imageInfo) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas
+
+            const { levelIndex, levelScaleFactor, tileWidth, tileHeight } = getBestTileLevel();
+            const imageBaseUrl = imageInfo['@id'] || imageInfo['id'];
+
+            // Visible region in full image coordinates
+            const viewX1 = (-offsetX) / currentScale;
+            const viewY1 = (-offsetY) / currentScale;
+            const viewX2 = (canvas.width - offsetX) / currentScale;
+            const viewY2 = (canvas.height - offsetY) / currentScale;
+
+            // Dimensions of a tile AT THE FULL RESOLUTION OF THE IMAGE
+            const tileWidthAtFullRes = tileWidth * levelScaleFactor;
+            const tileHeightAtFullRes = tileHeight * levelScaleFactor;
+            
+            const startCol = Math.floor(Math.max(0, viewX1) / tileWidthAtFullRes);
+            const endCol = Math.ceil(Math.min(fullImageWidth, viewX2) / tileWidthAtFullRes);
+            const startRow = Math.floor(Math.max(0, viewY1) / tileHeightAtFullRes);
+            const endRow = Math.ceil(Math.min(fullImageHeight, viewY2) / tileHeightAtFullRes);
+
+            let tilesToLoadCount = 0;
+
+            for (let r = startRow; r < endRow; r++) {
+                for (let c = startCol; c < endCol; c++) {
+                    const tileImageX = c * tileWidthAtFullRes;
+                    const tileImageY = r * tileHeightAtFullRes;
+                    
+                    // Ensure we don't request parts of tiles outside the image dimensions
+                    const actualTileWidthAtFullRes = Math.min(tileWidthAtFullRes, fullImageWidth - tileImageX);
+                    const actualTileHeightAtFullRes = Math.min(tileHeightAtFullRes, fullImageHeight - tileImageY);
+
+                    if (actualTileWidthAtFullRes <=0 || actualTileHeightAtFullRes <=0) continue;
+
+                    // The IIIF region parameter is always in full image coordinates
+                    const region = `${Math.round(tileImageX)},${Math.round(tileImageY)},${Math.round(actualTileWidthAtFullRes)},${Math.round(actualTileHeightAtFullRes)}`;
+                    
+                    // Request the tile at its native size for this level.
+                    // The `size` param can be `w,h` or `w,` or `,h` or `pct:n` or `max` or `!w,h`
+                    // For tiles, we usually want the size of the tile at that specific level.
+                    // The spec says for regions that are tiles, `size` should be `w,` or `max`
+                    // where `w` is the tile width.
+                    const size = `${tileWidth},`; // Request tile at its native width for the chosen level.
+                                                // The server will scale it if necessary.
+
+                    const tileUrl = `${imageBaseUrl}/${region}/${size}/0/default.jpg`; // Or .png, check info.json formats
+
+                    const tileCanvasX = tileImageX * currentScale + offsetX;
+                    const tileCanvasY = tileImageY * currentScale + offsetY;
+                    const tileCanvasWidth = actualTileWidthAtFullRes * currentScale;
+                    const tileCanvasHeight = actualTileHeightAtFullRes * currentScale;
+
+                    // Skip drawing if tile is completely off-screen (though loop bounds should mostly handle this)
+                    if (tileCanvasX + tileCanvasWidth < 0 || tileCanvasX > canvas.width ||
+                        tileCanvasY + tileCanvasHeight < 0 || tileCanvasY > canvas.height) {
+                        continue;
+                    }
+                    
+                    if (tileCache[tileUrl]) {
+                        ctx.drawImage(tileCache[tileUrl], tileCanvasX, tileCanvasY, tileCanvasWidth, tileCanvasHeight);
+                    } else {
+                        tilesToLoadCount++;
+                        if (!activeTileRequests.has(tileUrl)) {
+                            activeTileRequests.add(tileUrl);
+                            const img = new Image();
+                            img.crossOrigin = "anonymous"; // Important for IIIF servers
+                            img.onload = () => {
+                                tileCache[tileUrl] = img;
+                                activeTileRequests.delete(tileUrl);
+                                requestRedraw(); // Redraw when a tile loads
+                            };
+                            img.onerror = () => {
+                                console.error("Failed to load tile:", tileUrl);
+                                activeTileRequests.delete(tileUrl);
+                                // Optionally draw a placeholder for failed tiles
+                            };
+                            img.src = tileUrl;
+                        }
+                        // Draw a placeholder while loading
+                        ctx.fillStyle = '#ccc';
+                        ctx.fillRect(tileCanvasX, tileCanvasY, tileCanvasWidth, tileCanvasHeight);
+                        ctx.strokeStyle = '#999';
+                        ctx.strokeRect(tileCanvasX, tileCanvasY, tileCanvasWidth, tileCanvasHeight);
+                    }
+                }
+            }
+            if (tilesToLoadCount > 0) showLoading(true);
+            else showLoading(false);
+
+
+            // Draw rectangles
+            drawnRectangles.forEach((rect, index) => {
+                const color = RECT_COLORS[index % RECT_COLORS.length];
+                ctx.fillStyle = color;
+
+                // Convert stored percentage image coords to current canvas coords
+                const canvasRectX = (rect.x * fullImageWidth) * currentScale + offsetX;
+                const canvasRectY = (rect.y * fullImageHeight) * currentScale + offsetY;
+                const canvasRectWidth = (rect.width * fullImageWidth) * currentScale;
+                const canvasRectHeight = (rect.height * fullImageHeight) * currentScale;
+                
+                ctx.fillRect(canvasRectX, canvasRectY, canvasRectWidth, canvasRectHeight);
+            });
+
+            // Draw current rectangle if in drawing mode
+            if (isDrawingRect && currentRectLive) {
+                ctx.fillStyle = RECT_COLORS[nextRectColorIndex % RECT_COLORS.length];
+                ctx.fillRect(currentRectLive.x, currentRectLive.y, currentRectLive.width, currentRectLive.height);
+            }
+        }
+
+        let currentRectLive = null; // For live drawing feedback, in canvas coordinates
+
+        let redrawQueued = false;
+        function requestRedraw() {
+            if (!redrawQueued) {
+                redrawQueued = true;
+                requestAnimationFrame(() => {
+                    drawScene();
+                    redrawQueued = false;
+                });
+            }
+        }
+
+        // --- Event Handlers ---
+        loadImageButton.addEventListener('click', () => fetchImageInfo(iiifUrlInput.value));
+
+        canvas.addEventListener('mousedown', (e) => {
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (mode === 'panzoom') {
+                isPanning = true;
+                lastPanX = x;
+                lastPanY = y;
+                canvas.style.cursor = 'grabbing';
+            } else if (mode === 'draw') {
+                isDrawingRect = true;
+                rectStartX = x; // Canvas coordinates
+                rectStartY = y;
+                currentRectLive = { x: rectStartX, y: rectStartY, width: 0, height: 0 }; // Initialize
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!imageInfo) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (isPanning) {
+                const dx = x - lastPanX;
+                const dy = y - lastPanY;
+                offsetX += dx;
+                offsetY += dy;
+                lastPanX = x;
+                lastPanY = y;
+                requestRedraw();
+            } else if (isDrawingRect) {
+                const currentX = x;
+                const currentY = y;
+                currentRectLive.x = Math.min(rectStartX, currentX);
+                currentRectLive.y = Math.min(rectStartY, currentY);
+                currentRectLive.width = Math.abs(currentX - rectStartX);
+                currentRectLive.height = Math.abs(currentY - rectStartY);
+                requestRedraw();
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            if (isPanning) {
+                isPanning = false;
+                canvas.style.cursor = 'grab';
+            } else if (isDrawingRect) {
+                isDrawingRect = false;
+                const rect = canvas.getBoundingClientRect();
+                const finalX = e.clientX - rect.left;
+                const finalY = e.clientY - rect.top;
+
+                // Convert final canvas coordinates to image percentage coordinates
+                const imgX1 = (Math.min(rectStartX, finalX) - offsetX) / currentScale / fullImageWidth;
+                const imgY1 = (Math.min(rectStartY, finalY) - offsetY) / currentScale / fullImageHeight;
+                const imgX2 = (Math.max(rectStartX, finalX) - offsetX) / currentScale / fullImageWidth;
+                const imgY2 = (Math.max(rectStartY, finalY) - offsetY) / currentScale / fullImageHeight;
+                
+                const newRect = {
+                    x: Math.max(0, Math.min(1, imgX1)), // Clamp to [0,1]
+                    y: Math.max(0, Math.min(1, imgY1)),
+                    width: Math.max(0, Math.min(1 - imgX1, imgX2 - imgX1)),
+                    height: Math.max(0, Math.min(1 - imgY1, imgY2 - imgY1)),
+                };
+
+                // Avoid tiny/zero-size rectangles
+                if (newRect.width * fullImageWidth > 1 && newRect.height * fullImageHeight > 1) {
+                     drawnRectangles.push(newRect);
+                     nextRectColorIndex++;
+                     updateCoordsDisplay();
+                     copyRectsToClipboard();
+                }
+                currentRectLive = null; // Clear live drawing rect
+                requestRedraw();
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => { // Or mouseout
+            if (isPanning) {
+                isPanning = false;
+                canvas.style.cursor = 'grab';
+            }
+            // If drawing, could either cancel or finalize. For simplicity, let's finalize.
+            if (isDrawingRect) { 
+                // This is tricky because mouseup won't fire on canvas if it's outside.
+                // For a robust solution, you'd attach mousemove/mouseup to `document`
+                // while isDrawingRect is true. For this exercise, we'll keep it simple
+                // and rely on mouseup *on the canvas*.
+                // If the user mouses up outside, the rect drawing might be "stuck" until
+                // they click back on the canvas.
+            }
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            if (!imageInfo) return;
+            e.preventDefault();
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            if (mode !== 'panzoom') return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left; // Mouse position relative to canvas
+            const mouseY = e.clientY - rect.top;
+
+            // Convert mouse position to image coordinates
+            const imageMouseX = (mouseX - offsetX) / currentScale;
+            const imageMouseY = (mouseY - offsetY) / currentScale;
+
+            // Determine zoom factor
+            const delta = e.deltaY * ZOOM_SENSITIVITY;
+            const zoomFactor = Math.exp(-delta);
+            const newScale = currentScale * zoomFactor;
+
+            // Clamp scale to avoid excessive zoom in/out (optional)
+            // const minScale = Math.min(canvas.width / fullImageWidth, canvas.height / fullImageHeight) / 10; // Example min
+            // const maxScale = 10; // Example max
+            // currentScale = Math.max(minScale, Math.min(maxScale, newScale));
+            currentScale = newScale;
+
+            // Adjust offsetX and offsetY to keep the point under the mouse stationary
+            offsetX = mouseX - (imageMouseX * currentScale);
+            offsetY = mouseY - (imageMouseY * currentScale);
+
+            requestRedraw();
+        });
+
+        modeRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (radio.value === 'panzoom') {
+                    canvas.style.cursor = 'grab';
+                } else {
+                    canvas.style.cursor = 'crosshair';
+                }
+                // If switching modes while drawing, cancel drawing
+                if (isDrawingRect) {
+                    isDrawingRect = false;
+                    currentRectLive = null;
+                    requestRedraw();
+                }
+            });
+        });
+        
+        window.addEventListener('resize', () => {
+            // Debounce resize handling if needed
+            fitImageToCanvas();
+        });
+
+        function updateCoordsDisplay() {
+            let text = "Rectangle Coordinates (x,y,w,h - % of image):\n";
+            drawnRectangles.forEach(r => {
+                text += `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.width.toFixed(4)},${r.height.toFixed(4)}\n`;
+            });
+            coordsDisplay.textContent = text;
+        }
+
+        function copyRectsToClipboard() {
+            let clipboardText = "";
+            drawnRectangles.forEach(r => {
+                clipboardText += `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.width.toFixed(4)},${r.height.toFixed(4)}\n`;
+            });
+            
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(clipboardText.trim())
+                    .then(() => { console.log('Rectangle coordinates copied to clipboard.'); })
+                    .catch(err => { console.error('Failed to copy coordinates: ', err); });
+            } else {
+                // Fallback for older browsers (less secure, more intrusive)
+                const textArea = document.createElement("textarea");
+                textArea.value = clipboardText.trim();
+                textArea.style.position = "fixed"; // Avoid scrolling to bottom
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    console.log('Rectangle coordinates copied to clipboard (fallback).');
+                } catch (err) {
+                    console.error('Fallback copy failed: ', err);
+                }
+                document.body.removeChild(textArea);
+            }
+        }
+
+        // Initial load
+        fetchImageInfo(iiifUrlInput.value);
+
+    </script>
+</body>
+</html>
+
+
+
+							<script>
+                            	
+        const canvas = document.getElementById('imageCanvas');
+        const ctx = canvas.getContext('2d');
+        const iiifUrlInput = document.getElementById('iiif-url');
+        const loadImageButton = document.getElementById('load-image');
+        const modeRadios = document.querySelectorAll('input[name="mode"]');
+        const coordsDisplay = document.getElementById('coords-display');
+        const viewerContainer = document.getElementById('viewer-container');
+        const loadingSpinner = document.getElementById('loading-spinner');
+
+        // --- Global state for image and view ---
+        let imageInfo = null;
+        let fullImageWidth = 0;
+        let fullImageHeight = 0;
+        let currentScale = 1.0;
+        let offsetX = 0; // Top-left of image relative to canvas top-left
+        let offsetY = 0;
+
+        // --- Pan/Zoom State ---
+        let isPanning = false;
+        let lastPanX, lastPanY;
+        const ZOOM_SENSITIVITY = 0.001;
+
+        // --- Drawing State ---
+        let isDrawingRect = false;
+        let rectStartX, rectStartY; // Canvas coordinates
+        
+        // --- Rectangle Data (GLOBAL - Exercise special care not to redefine) ---
+        let drawnRectangles = []; // Stores {x, y, width, height} in IMAGE coordinates (0-1.0)
+        const RECT_COLORS = [
+            'rgba(255, 0, 0, 0.3)',   // Red
+            'rgba(0, 255, 0, 0.3)',   // Green
+            'rgba(0, 0, 255, 0.3)',   // Blue
+            'rgba(255, 255, 0, 0.3)', // Yellow
+            'rgba(255, 0, 255, 0.3)', // Magenta
+            'rgba(0, 255, 255, 0.3)'  // Cyan
+        ];
+        let nextRectColorIndex = 0;
+
+        // --- Tile Cache ---
+        let tileCache = {};
+        let activeTileRequests = new Set();
+
+        function showLoading(show) {
+            loadingSpinner.style.display = show ? 'block' : 'none';
+        }
+
+        async function fetchImageInfo(url) {
+            showLoading(true);
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                imageInfo = await response.json();
+                fullImageWidth = imageInfo.width;
+                fullImageHeight = imageInfo.height;
+                
+                // Reset state for new image
+                drawnRectangles = []; 
+                nextRectColorIndex = 0;
+                tileCache = {};
+                updateCoordsDisplay();
+
+                fitImageToCanvas();
+                return true;
+            } catch (error) {
+                console.error("Failed to load IIIF info:", error);
+                alert("Error loading IIIF info: " + error.message);
+                imageInfo = null;
+                return false;
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function fitImageToCanvas() {
+            if (!imageInfo) return;
+
+            // Resize canvas to fit container, then fit image to canvas
+            const containerRect = viewerContainer.getBoundingClientRect();
+            canvas.width = containerRect.width -2; // -2 for border
+            canvas.height = containerRect.height -2;
+
+            const scaleX = canvas.width / fullImageWidth;
+            const scaleY = canvas.height / fullImageHeight;
+            currentScale = Math.min(scaleX, scaleY);
+
+            // Center the image
+            offsetX = (canvas.width - fullImageWidth * currentScale) / 2;
+            offsetY = (canvas.height - fullImageHeight * currentScale) / 2;
+            
+            requestRedraw();
+        }
+        
+        function getBestTileLevel() {
+            if (!imageInfo || !imageInfo.tiles || !imageInfo.tiles[0] || !imageInfo.tiles[0].scaleFactors) {
+                // Fallback if no scaleFactors - assume single tile size or try to derive
+                return { levelScaleFactor: 1, tileWidth: imageInfo.tiles?.[0]?.width || 256, tileHeight: imageInfo.tiles?.[0]?.height || 256 };
+            }
+        
+            const targetResolution = 1 / currentScale; // Image pixels per screen pixel desired for tiles
+            const scaleFactors = imageInfo.tiles[0].scaleFactors;
+            let bestLevelIndex = 0;
+            let minDiff = Infinity;
+        
+            // Find the scaleFactor that results in tiles being rendered closest to 1:1 on screen
+            // A scaleFactor in IIIF info means 1 / (level's downsampling factor from full res)
+            // e.g. scaleFactor 1 is full res, 2 is half res (image is 1/2 size), 4 is quarter res (image is 1/4 size)
+            // So, if currentScale makes image pixels small on screen, we want a smaller scaleFactor (higher res level)
+            // If currentScale makes image pixels large on screen, we want a larger scaleFactor (lower res level)
+            
+            // Let's rephrase: We want tile_pixel_size_on_screen to be close to tile_native_pixel_size
+            // tile_pixel_size_on_screen = (native_tile_width_at_level / scale_factor_for_level) * currentScale
+            // The `scaleFactors` array from IIIF info is actually `1 / downsample_factor`.
+            // So, a `scaleFactor` of 4 means the image at this level is 1/4th the full resolution.
+            // We want `currentScale / level_scale_factor` to be close to 1.
+            // i.e., `level_scale_factor` close to `currentScale`.
+
+            for (let i = 0; i < scaleFactors.length; i++) {
+                const levelScale = 1 / scaleFactors[i]; // This is how much bigger a pixel at this level is compared to a full-res pixel
+                                                        // e.g. for scaleFactor 4 (1/4 res), levelScale is 4.
+                const diff = Math.abs(levelScale - (1/currentScale));
+
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    bestLevelIndex = i;
+                }
+                // Prefer slightly over-sampling
+                if (levelScale >= (1/currentScale) && diff < (minDiff + 0.1)) { // Heuristic
+                     minDiff = diff;
+                     bestLevelIndex = i;
+                }
+            }
+            
+            const chosenScaleFactor = scaleFactors[bestLevelIndex]; // This is the factor to apply to full res dims
+            const tileWidth = imageInfo.tiles[0].width; // Assuming consistent tile width
+            const tileHeight = imageInfo.tiles[0].height || tileWidth;
+
+            return {
+                levelIndex: bestLevelIndex,
+                levelScaleFactor: chosenScaleFactor, // e.g., 1, 2, 4, 8 (how much the image is downscaled at this level)
+                tileWidth: tileWidth, // physical tile dimension at this level
+                tileHeight: tileHeight // physical tile dimension at this level
+            };
+        }
+
+
+        async function drawScene() {
+            if (!imageInfo) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas
+
+            const { levelIndex, levelScaleFactor, tileWidth, tileHeight } = getBestTileLevel();
+            const imageBaseUrl = imageInfo['@id'] || imageInfo['id'];
+
+            // Visible region in full image coordinates
+            const viewX1 = (-offsetX) / currentScale;
+            const viewY1 = (-offsetY) / currentScale;
+            const viewX2 = (canvas.width - offsetX) / currentScale;
+            const viewY2 = (canvas.height - offsetY) / currentScale;
+
+            // Dimensions of a tile AT THE FULL RESOLUTION OF THE IMAGE
+            const tileWidthAtFullRes = tileWidth * levelScaleFactor;
+            const tileHeightAtFullRes = tileHeight * levelScaleFactor;
+            
+            const startCol = Math.floor(Math.max(0, viewX1) / tileWidthAtFullRes);
+            const endCol = Math.ceil(Math.min(fullImageWidth, viewX2) / tileWidthAtFullRes);
+            const startRow = Math.floor(Math.max(0, viewY1) / tileHeightAtFullRes);
+            const endRow = Math.ceil(Math.min(fullImageHeight, viewY2) / tileHeightAtFullRes);
+
+            let tilesToLoadCount = 0;
+
+            for (let r = startRow; r < endRow; r++) {
+                for (let c = startCol; c < endCol; c++) {
+                    const tileImageX = c * tileWidthAtFullRes;
+                    const tileImageY = r * tileHeightAtFullRes;
+                    
+                    // Ensure we don't request parts of tiles outside the image dimensions
+                    const actualTileWidthAtFullRes = Math.min(tileWidthAtFullRes, fullImageWidth - tileImageX);
+                    const actualTileHeightAtFullRes = Math.min(tileHeightAtFullRes, fullImageHeight - tileImageY);
+
+                    if (actualTileWidthAtFullRes <=0 || actualTileHeightAtFullRes <=0) continue;
+
+                    // The IIIF region parameter is always in full image coordinates
+                    const region = `${Math.round(tileImageX)},${Math.round(tileImageY)},${Math.round(actualTileWidthAtFullRes)},${Math.round(actualTileHeightAtFullRes)}`;
+                    
+                    // Request the tile at its native size for this level.
+                    // The `size` param can be `w,h` or `w,` or `,h` or `pct:n` or `max` or `!w,h`
+                    // For tiles, we usually want the size of the tile at that specific level.
+                    // The spec says for regions that are tiles, `size` should be `w,` or `max`
+                    // where `w` is the tile width.
+                    const size = `${tileWidth},`; // Request tile at its native width for the chosen level.
+                                                // The server will scale it if necessary.
+
+                    const tileUrl = `${imageBaseUrl}/${region}/${size}/0/default.jpg`; // Or .png, check info.json formats
+
+                    const tileCanvasX = tileImageX * currentScale + offsetX;
+                    const tileCanvasY = tileImageY * currentScale + offsetY;
+                    const tileCanvasWidth = actualTileWidthAtFullRes * currentScale;
+                    const tileCanvasHeight = actualTileHeightAtFullRes * currentScale;
+
+                    // Skip drawing if tile is completely off-screen (though loop bounds should mostly handle this)
+                    if (tileCanvasX + tileCanvasWidth < 0 || tileCanvasX > canvas.width ||
+                        tileCanvasY + tileCanvasHeight < 0 || tileCanvasY > canvas.height) {
+                        continue;
+                    }
+                    
+                    if (tileCache[tileUrl]) {
+                        ctx.drawImage(tileCache[tileUrl], tileCanvasX, tileCanvasY, tileCanvasWidth, tileCanvasHeight);
+                    } else {
+                        tilesToLoadCount++;
+                        if (!activeTileRequests.has(tileUrl)) {
+                            activeTileRequests.add(tileUrl);
+                            const img = new Image();
+                            img.crossOrigin = "anonymous"; // Important for IIIF servers
+                            img.onload = () => {
+                                tileCache[tileUrl] = img;
+                                activeTileRequests.delete(tileUrl);
+                                requestRedraw(); // Redraw when a tile loads
+                            };
+                            img.onerror = () => {
+                                console.error("Failed to load tile:", tileUrl);
+                                activeTileRequests.delete(tileUrl);
+                                // Optionally draw a placeholder for failed tiles
+                            };
+                            img.src = tileUrl;
+                        }
+                        // Draw a placeholder while loading
+                        ctx.fillStyle = '#ccc';
+                        ctx.fillRect(tileCanvasX, tileCanvasY, tileCanvasWidth, tileCanvasHeight);
+                        ctx.strokeStyle = '#999';
+                        ctx.strokeRect(tileCanvasX, tileCanvasY, tileCanvasWidth, tileCanvasHeight);
+                    }
+                }
+            }
+            if (tilesToLoadCount > 0) showLoading(true);
+            else showLoading(false);
+
+
+            // Draw rectangles
+            drawnRectangles.forEach((rect, index) => {
+                const color = RECT_COLORS[index % RECT_COLORS.length];
+                ctx.fillStyle = color;
+
+                // Convert stored percentage image coords to current canvas coords
+                const canvasRectX = (rect.x * fullImageWidth) * currentScale + offsetX;
+                const canvasRectY = (rect.y * fullImageHeight) * currentScale + offsetY;
+                const canvasRectWidth = (rect.width * fullImageWidth) * currentScale;
+                const canvasRectHeight = (rect.height * fullImageHeight) * currentScale;
+                
+                ctx.fillRect(canvasRectX, canvasRectY, canvasRectWidth, canvasRectHeight);
+            });
+
+            // Draw current rectangle if in drawing mode
+            if (isDrawingRect && currentRectLive) {
+                ctx.fillStyle = RECT_COLORS[nextRectColorIndex % RECT_COLORS.length];
+                ctx.fillRect(currentRectLive.x, currentRectLive.y, currentRectLive.width, currentRectLive.height);
+            }
+        }
+
+        let currentRectLive = null; // For live drawing feedback, in canvas coordinates
+
+        let redrawQueued = false;
+        function requestRedraw() {
+            if (!redrawQueued) {
+                redrawQueued = true;
+                requestAnimationFrame(() => {
+                    drawScene();
+                    redrawQueued = false;
+                });
+            }
+        }
+
+        // --- Event Handlers ---
+        loadImageButton.addEventListener('click', () => fetchImageInfo(iiifUrlInput.value));
+
+        canvas.addEventListener('mousedown', (e) => {
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (mode === 'panzoom') {
+                isPanning = true;
+                lastPanX = x;
+                lastPanY = y;
+                canvas.style.cursor = 'grabbing';
+            } else if (mode === 'draw') {
+                isDrawingRect = true;
+                rectStartX = x; // Canvas coordinates
+                rectStartY = y;
+                currentRectLive = { x: rectStartX, y: rectStartY, width: 0, height: 0 }; // Initialize
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!imageInfo) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (isPanning) {
+                const dx = x - lastPanX;
+                const dy = y - lastPanY;
+                offsetX += dx;
+                offsetY += dy;
+                lastPanX = x;
+                lastPanY = y;
+                requestRedraw();
+            } else if (isDrawingRect) {
+                const currentX = x;
+                const currentY = y;
+                currentRectLive.x = Math.min(rectStartX, currentX);
+                currentRectLive.y = Math.min(rectStartY, currentY);
+                currentRectLive.width = Math.abs(currentX - rectStartX);
+                currentRectLive.height = Math.abs(currentY - rectStartY);
+                requestRedraw();
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            if (isPanning) {
+                isPanning = false;
+                canvas.style.cursor = 'grab';
+            } else if (isDrawingRect) {
+                isDrawingRect = false;
+                const rect = canvas.getBoundingClientRect();
+                const finalX = e.clientX - rect.left;
+                const finalY = e.clientY - rect.top;
+
+                // Convert final canvas coordinates to image percentage coordinates
+                const imgX1 = (Math.min(rectStartX, finalX) - offsetX) / currentScale / fullImageWidth;
+                const imgY1 = (Math.min(rectStartY, finalY) - offsetY) / currentScale / fullImageHeight;
+                const imgX2 = (Math.max(rectStartX, finalX) - offsetX) / currentScale / fullImageWidth;
+                const imgY2 = (Math.max(rectStartY, finalY) - offsetY) / currentScale / fullImageHeight;
+                
+                const newRect = {
+                    x: Math.max(0, Math.min(1, imgX1)), // Clamp to [0,1]
+                    y: Math.max(0, Math.min(1, imgY1)),
+                    width: Math.max(0, Math.min(1 - imgX1, imgX2 - imgX1)),
+                    height: Math.max(0, Math.min(1 - imgY1, imgY2 - imgY1)),
+                };
+
+                // Avoid tiny/zero-size rectangles
+                if (newRect.width * fullImageWidth > 1 && newRect.height * fullImageHeight > 1) {
+                     drawnRectangles.push(newRect);
+                     nextRectColorIndex++;
+                     updateCoordsDisplay();
+                     copyRectsToClipboard();
+                }
+                currentRectLive = null; // Clear live drawing rect
+                requestRedraw();
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => { // Or mouseout
+            if (isPanning) {
+                isPanning = false;
+                canvas.style.cursor = 'grab';
+            }
+            // If drawing, could either cancel or finalize. For simplicity, let's finalize.
+            if (isDrawingRect) { 
+                // This is tricky because mouseup won't fire on canvas if it's outside.
+                // For a robust solution, you'd attach mousemove/mouseup to `document`
+                // while isDrawingRect is true. For this exercise, we'll keep it simple
+                // and rely on mouseup *on the canvas*.
+                // If the user mouses up outside, the rect drawing might be "stuck" until
+                // they click back on the canvas.
+            }
+        });
+
+        canvas.addEventListener('wheel', (e) => {
+            if (!imageInfo) return;
+            e.preventDefault();
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+            if (mode !== 'panzoom') return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left; // Mouse position relative to canvas
+            const mouseY = e.clientY - rect.top;
+
+            // Convert mouse position to image coordinates
+            const imageMouseX = (mouseX - offsetX) / currentScale;
+            const imageMouseY = (mouseY - offsetY) / currentScale;
+
+            // Determine zoom factor
+            const delta = e.deltaY * ZOOM_SENSITIVITY;
+            const zoomFactor = Math.exp(-delta);
+            const newScale = currentScale * zoomFactor;
+
+            // Clamp scale to avoid excessive zoom in/out (optional)
+            // const minScale = Math.min(canvas.width / fullImageWidth, canvas.height / fullImageHeight) / 10; // Example min
+            // const maxScale = 10; // Example max
+            // currentScale = Math.max(minScale, Math.min(maxScale, newScale));
+            currentScale = newScale;
+
+            // Adjust offsetX and offsetY to keep the point under the mouse stationary
+            offsetX = mouseX - (imageMouseX * currentScale);
+            offsetY = mouseY - (imageMouseY * currentScale);
+
+            requestRedraw();
+        });
+
+        modeRadios.forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (radio.value === 'panzoom') {
+                    canvas.style.cursor = 'grab';
+                } else {
+                    canvas.style.cursor = 'crosshair';
+                }
+                // If switching modes while drawing, cancel drawing
+                if (isDrawingRect) {
+                    isDrawingRect = false;
+                    currentRectLive = null;
+                    requestRedraw();
+                }
+            });
+        });
+        
+        window.addEventListener('resize', () => {
+            // Debounce resize handling if needed
+            fitImageToCanvas();
+        });
+
+        function updateCoordsDisplay() {
+            let text = "Rectangle Coordinates (x,y,w,h - % of image):\n";
+            drawnRectangles.forEach(r => {
+                text += `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.width.toFixed(4)},${r.height.toFixed(4)}\n`;
+            });
+            coordsDisplay.textContent = text;
+        }
+
+        function copyRectsToClipboard() {
+            let clipboardText = "";
+            drawnRectangles.forEach(r => {
+                clipboardText += `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.width.toFixed(4)},${r.height.toFixed(4)}\n`;
+            });
+            
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(clipboardText.trim())
+                    .then(() => { console.log('Rectangle coordinates copied to clipboard.'); })
+                    .catch(err => { console.error('Failed to copy coordinates: ', err); });
+            } else {
+                // Fallback for older browsers (less secure, more intrusive)
+                const textArea = document.createElement("textarea");
+                textArea.value = clipboardText.trim();
+                textArea.style.position = "fixed"; // Avoid scrolling to bottom
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    console.log('Rectangle coordinates copied to clipboard (fallback).');
+                } catch (err) {
+                    console.error('Fallback copy failed: ', err);
+                }
+                document.body.removeChild(textArea);
+            }
+        }
+
+        // Initial load
+        fetchImageInfo(iiifUrlInput.value);
+
+    
+
+							</script>
+                        </body>
+                        </html>
+                    

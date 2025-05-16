@@ -1,0 +1,1095 @@
+
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body {
+									background-color: white; /* Ensure the iframe has a white background */
+								}
+
+								
+        body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        .controls { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;}
+        .controls label, .controls button, .controls select { margin-right: 10px; }
+        #viewer-container {
+            width: 100%;
+            flex-grow: 1;
+            position: relative;
+            overflow: hidden;
+            background-color: #ddd;
+            cursor: grab;
+        }
+        #viewer-container.drawing { cursor: crosshair; }
+        #tile-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%; /* Will be set by JS */
+            height: 100%; /* Will be set by JS */
+            transform-origin: 0 0;
+        }
+        #tile-container img {
+            position: absolute;
+            /* Prevent browser drag for images */
+            -webkit-user-drag: none;
+            -khtml-user-drag: none;
+            -moz-user-drag: none;
+            -o-user-drag: none;
+            user-drag: none;
+        }
+        #overlay-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Initially, let mouse events pass through */
+        }
+        #viewer-container.drawing #overlay-canvas {
+            pointer-events: auto; /* Capture mouse when drawing */
+        }
+        #coordinates-display {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            height: 100px;
+            overflow-y: auto;
+            white-space: pre; /* Preserve line breaks */
+            font-family: monospace;
+        }
+        #status-message { margin-left: auto; color: #555; }
+    
+
+							</style>
+                        </head>
+                        <body>
+                            <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IIIF Viewer from Scratch</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+        .controls { padding: 10px; background-color: #f0f0f0; border-bottom: 1px solid #ccc; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;}
+        .controls label, .controls button, .controls select { margin-right: 10px; }
+        #viewer-container {
+            width: 100%;
+            flex-grow: 1;
+            position: relative;
+            overflow: hidden;
+            background-color: #ddd;
+            cursor: grab;
+        }
+        #viewer-container.drawing { cursor: crosshair; }
+        #tile-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%; /* Will be set by JS */
+            height: 100%; /* Will be set by JS */
+            transform-origin: 0 0;
+        }
+        #tile-container img {
+            position: absolute;
+            /* Prevent browser drag for images */
+            -webkit-user-drag: none;
+            -khtml-user-drag: none;
+            -moz-user-drag: none;
+            -o-user-drag: none;
+            user-drag: none;
+        }
+        #overlay-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Initially, let mouse events pass through */
+        }
+        #viewer-container.drawing #overlay-canvas {
+            pointer-events: auto; /* Capture mouse when drawing */
+        }
+        #coordinates-display {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            height: 100px;
+            overflow-y: auto;
+            white-space: pre; /* Preserve line breaks */
+            font-family: monospace;
+        }
+        #status-message { margin-left: auto; color: #555; }
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <label for="iiif-url">IIIF Info URL:</label>
+        <input type="text" id="iiif-url" style="flex-grow:1; min-width: 300px;" value="http://www.homermultitext.org/iipsrv?IIIF=/project/homer/pyramidal/deepzoom/hmt/vaimg/2017a/VA012RN_0013.tif/info.json">
+        <button id="load-image">Load Image</button>
+        <label for="interaction-mode">Mode:</label>
+        <select id="interaction-mode">
+            <option value="pan">Pan & Zoom</option>
+            <option value="draw">Draw Rectangle</option>
+        </select>
+        <button id="clear-rects">Clear Rectangles</button>
+        <span id="status-message"></span>
+    </div>
+
+    <div id="viewer-container">
+        <div id="tile-container"></div>
+        <canvas id="overlay-canvas"></canvas>
+    </div>
+
+    <div id="coordinates-display-container">
+        <p>Rectangle Coordinates (Normalized: X, Y, Width, Height as % of image, 0.0-1.0):</p>
+        <div id="coordinates-display"></div>
+    </div>
+
+    <script>
+    (function() {
+        // --- Configuration ---
+        const RECT_COLORS = [
+            'rgba(255, 0, 0, 0.3)',   // Red
+            'rgba(0, 255, 0, 0.3)',   // Green
+            'rgba(0, 0, 255, 0.3)',   // Blue
+            'rgba(255, 255, 0, 0.3)', // Yellow
+            'rgba(0, 255, 255, 0.3)', // Cyan
+            'rgba(255, 0, 255, 0.3)'  // Magenta
+        ];
+        const MIN_ZOOM_MARGIN = 0.95; // Allow zooming out slightly beyond fit-to-screen
+        const MAX_ZOOM_SCALE = 4;    // Max zoom relative to 1:1 pixel scale
+
+        // --- DOM Elements ---
+        const iiifUrlInput = document.getElementById('iiif-url');
+        const loadImageButton = document.getElementById('load-image');
+        const interactionModeSelect = document.getElementById('interaction-mode');
+        const clearRectsButton = document.getElementById('clear-rects');
+        const viewerContainer = document.getElementById('viewer-container');
+        const tileContainer = document.getElementById('tile-container');
+        const overlayCanvas = document.getElementById('overlay-canvas');
+        const overlayCtx = overlayCanvas.getContext('2d');
+        const coordinatesDisplay = document.getElementById('coordinates-display');
+        const statusMessage = document.getElementById('status-message');
+
+        // --- State Variables ---
+        let iiifInfo = null;
+        let imageFullWidth = 0;
+        let imageFullHeight = 0;
+
+        // Viewport state:
+        // offsetX, offsetY: top-left of the viewport in full image coordinates
+        // zoom: current display scale (displayedPixel / originalImagePixel)
+        let viewState = {
+            offsetX: 0,
+            offsetY: 0,
+            zoom: 1
+        };
+        let minZoomLevel = 1; // Calculated on image load
+
+        // Interaction state
+        let isPanning = false;
+        let lastPanX, lastPanY;
+        let isDrawing = false;
+        let rectStartX, rectStartY; // In viewport coordinates
+
+        // Rectangle data (normalized coordinates: x, y, w, h from 0.0 to 1.0)
+        // This variable `rectangles` is defined once in this scope and modified, not redefined.
+        let rectangles = [];
+
+        // --- Initialization ---
+        function init() {
+            loadImageButton.addEventListener('click', loadIIIFImage);
+            interactionModeSelect.addEventListener('change', switchInteractionMode);
+            clearRectsButton.addEventListener('click', clearAllRectangles);
+
+            viewerContainer.addEventListener('mousedown', handleMouseDown);
+            viewerContainer.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mouseup', handleMouseUp); // Use window for mouseup to catch drags outside viewer
+            viewerContainer.addEventListener('wheel', handleWheelZoom, { passive: false });
+            
+            window.addEventListener('resize', setupCanvases);
+
+            // Initial mode setup
+            switchInteractionMode();
+            loadIIIFImage(); // Load default image on page load
+        }
+
+        // --- IIIF Loading ---
+        async function loadIIIFImage() {
+            const url = iiifUrlInput.value.trim();
+            if (!url) {
+                updateStatus("Please enter a IIIF info.json URL.");
+                return;
+            }
+            updateStatus("Loading IIIF data...");
+            try {
+                const response = await fetch(url, { mode: 'cors' }); // anonymous CORS by default
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                iiifInfo = await response.json();
+                
+                imageFullWidth = iiifInfo.width;
+                imageFullHeight = iiifInfo.height;
+
+                if (!iiifInfo.tiles || !iiifInfo.tiles[0] || !iiifInfo.tiles[0].scaleFactors) {
+                    throw new Error("IIIF info.json does not contain necessary tile information (tiles[0].scaleFactors).");
+                }
+
+                updateStatus("Image info loaded. Rendering...");
+                setupCanvases(); // Resize canvases first
+                setInitialView();
+                render();
+            } catch (error) {
+                console.error("Failed to load IIIF info:", error);
+                updateStatus(`Error: ${error.message}`);
+                iiifInfo = null;
+                clearViewer();
+            }
+        }
+
+        function clearViewer() {
+            tileContainer.innerHTML = ''; // Remove all tile images
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+
+        function setInitialView() {
+            if (!imageFullWidth || !imageFullHeight) return;
+
+            const viewerRect = viewerContainer.getBoundingClientRect();
+            const aspectX = viewerRect.width / imageFullWidth;
+            const aspectY = viewerRect.height / imageFullHeight;
+            
+            viewState.zoom = Math.min(aspectX, aspectY);
+            minZoomLevel = viewState.zoom * MIN_ZOOM_MARGIN;
+
+            // Center the image if it's smaller than the viewport in one dimension
+            const displayedWidth = imageFullWidth * viewState.zoom;
+            const displayedHeight = imageFullHeight * viewState.zoom;
+
+            viewState.offsetX = (imageFullWidth / 2) - (viewerRect.width / 2 / viewState.zoom);
+            viewState.offsetY = (imageFullHeight / 2) - (viewerRect.height / 2 / viewState.zoom);
+            
+            // Adjust if image is letterboxed/pillarboxed to start at 0,0 visual for the content
+            if (aspectX < aspectY) { // Image is wider or perfectly fits width, possible letterbox
+                 viewState.offsetY = (imageFullHeight - viewerRect.height / viewState.zoom) / 2;
+                 viewState.offsetX = 0; // Start at left edge of image
+            } else { // Image is taller or perfectly fits height, possible pillarbox
+                 viewState.offsetX = (imageFullWidth - viewerRect.width / viewState.zoom) / 2;
+                 viewState.offsetY = 0; // Start at top edge of image
+            }
+            // Ensure initial view starts at 0,0 of the image content if it's smaller
+            // Correct for initial fit:
+            viewState.offsetX = 0;
+            viewState.offsetY = 0;
+        }
+
+        // --- Canvas and Rendering ---
+        function setupCanvases() {
+            const viewerRect = viewerContainer.getBoundingClientRect();
+            overlayCanvas.width = viewerRect.width;
+            overlayCanvas.height = viewerRect.height;
+            if (iiifInfo) render(); // Re-render if image is loaded
+        }
+
+        function render() {
+            if (!iiifInfo) return;
+            requestAnimationFrame(() => {
+                clearViewer(); // Clear old tiles and overlay before drawing new ones
+                renderTiles();
+                renderRectanglesOverlay();
+            });
+        }
+
+        function renderTiles() {
+            if (!iiifInfo || !imageFullWidth) return;
+
+            const viewerRect = viewerContainer.getBoundingClientRect();
+            const { offsetX, offsetY, zoom } = viewState;
+
+            // Determine appropriate IIIF level based on current zoom
+            // Target resolution: 1 on-screen pixel = 1 image pixel from the tile
+            // desired pixels per original image pixel = zoom
+            // desired scale factor for tiles = 1 / zoom (e.g. zoom 0.5 means scale factor 2)
+            const targetScaleFactor = 1 / zoom;
+            
+            const scaleFactors = iiifInfo.tiles[0].scaleFactors;
+            let bestLevelIndex = scaleFactors.length - 1; // Start with lowest resolution
+            for (let i = 0; i < scaleFactors.length; i++) {
+                if (scaleFactors[i] <= targetScaleFactor) {
+                    bestLevelIndex = i; // Found a scale factor that is good enough or better
+                    break; 
+                }
+            }
+            // If targetScaleFactor is smaller than all available, use highest res (index 0)
+            if (targetScaleFactor < scaleFactors[0]) bestLevelIndex = 0;
+
+
+            const currentScaleFactor = scaleFactors[bestLevelIndex];
+            const tileWidthNominal = iiifInfo.tiles[0].width;
+            const tileHeightNominal = iiifInfo.tiles[0].height || tileWidthNominal; // Assume square if not specified
+
+            // Calculate which tiles are visible
+            // Viewport bounds in full image coordinates
+            const viewLeft = offsetX;
+            const viewTop = offsetY;
+            const viewRight = offsetX + viewerRect.width / zoom;
+            const viewBottom = offsetY + viewerRect.height / zoom;
+
+            // Tile indices
+            const tileSourceWidth = tileWidthNominal * currentScaleFactor; // Width this tile covers in full image pixels
+            const tileSourceHeight = tileHeightNominal * currentScaleFactor;
+
+            const firstCol = Math.max(0, Math.floor(viewLeft / tileSourceWidth));
+            const lastCol = Math.min(Math.ceil(imageFullWidth / tileSourceWidth) -1, Math.floor(viewRight / tileSourceWidth));
+            const firstRow = Math.max(0, Math.floor(viewTop / tileSourceHeight));
+            const lastRow = Math.min(Math.ceil(imageFullHeight / tileSourceHeight) -1, Math.floor(viewBottom / tileSourceHeight));
+            
+            const baseUrl = iiifInfo['@id'] || iiifInfo['id']; // IIIF 2.0 vs 3.0
+
+            for (let r = firstRow; r <= lastRow; r++) {
+                for (let c = firstCol; c <= lastCol; c++) {
+                    const tileXFull = c * tileSourceWidth;
+                    const tileYFull = r * tileSourceHeight;
+                    
+                    let tileWFull = tileSourceWidth;
+                    let tileHFull = tileSourceHeight;
+
+                    // Adjust for edge tiles that are smaller than full tile size
+                    if (tileXFull + tileWFull > imageFullWidth) {
+                        tileWFull = imageFullWidth - tileXFull;
+                    }
+                    if (tileYFull + tileHFull > imageFullHeight) {
+                        tileHFull = imageFullHeight - tileYFull;
+                    }
+                    if (tileWFull <=0 || tileHFull <=0) continue;
+
+                    // Size parameter for IIIF URL: request tile at its native resolution for this level
+                    // The server will scale the region (tileXFull,tileYFull,tileWFull,tileHFull)
+                    // to be tileWidthAtThisLevel wide.
+                    const tileWidthAtThisLevel = Math.ceil(tileWFull / currentScaleFactor);
+                    // const tileHeightAtThisLevel = Math.ceil(tileHFull / currentScaleFactor); // Server calculates height
+
+                    const tileUrl = `${baseUrl}/${tileXFull},${tileYFull},${tileWFull},${tileHFull}/${tileWidthAtThisLevel},/0/default.jpg`;
+                    
+                    const img = document.createElement('img');
+                    img.crossOrigin = "anonymous"; // Handle CORS for images
+                    img.src = tileUrl;
+                    
+                    // Position and size on screen
+                    img.style.left = `${(tileXFull - offsetX) * zoom}px`;
+                    img.style.top = `${(tileYFull - offsetY) * zoom}px`;
+                    img.style.width = `${tileWFull * zoom}px`;
+                    img.style.height = `${tileHFull * zoom}px`;
+                    
+                    tileContainer.appendChild(img);
+                }
+            }
+        }
+
+        function renderRectanglesOverlay() {
+            if (!imageFullWidth) return;
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+            rectangles.forEach((rect, index) => {
+                // Convert normalized rect to full image coordinates
+                const imgX = rect.x * imageFullWidth;
+                const imgY = rect.y * imageFullHeight;
+                const imgW = rect.w * imageFullWidth;
+                const imgH = rect.h * imageFullHeight;
+
+                // Convert full image coordinates to viewport coordinates
+                const vpX = (imgX - viewState.offsetX) * viewState.zoom;
+                const vpY = (imgY - viewState.offsetY) * viewState.zoom;
+                const vpW = imgW * viewState.zoom;
+                const vpH = imgH * viewState.zoom;
+
+                overlayCtx.fillStyle = RECT_COLORS[index % RECT_COLORS.length];
+                overlayCtx.fillRect(vpX, vpY, vpW, vpH);
+            });
+
+            // If currently drawing, draw the temporary rectangle
+            if (isDrawing && currentTempRect) {
+                overlayCtx.fillStyle = RECT_COLORS[rectangles.length % RECT_COLORS.length];
+                overlayCtx.fillRect(currentTempRect.x, currentTempRect.y, currentTempRect.w, currentTempRect.h);
+            }
+        }
+
+        // --- Interaction Mode ---
+        function switchInteractionMode() {
+            const mode = interactionModeSelect.value;
+            if (mode === 'pan') {
+                viewerContainer.classList.remove('drawing');
+                viewerContainer.style.cursor = 'grab';
+                overlayCanvas.style.pointerEvents = 'none';
+            } else { // draw
+                viewerContainer.classList.add('drawing');
+                viewerContainer.style.cursor = 'crosshair';
+                overlayCanvas.style.pointerEvents = 'auto';
+            }
+        }
+
+        // --- Mouse Event Handlers ---
+        function handleMouseDown(event) {
+            // Prevent browser default drag behavior for images, if any leak through
+            if (event.target.tagName === 'IMG') {
+                event.preventDefault();
+            }
+
+            const mode = interactionModeSelect.value;
+            const rect = viewerContainer.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            if (mode === 'pan') {
+                isPanning = true;
+                lastPanX = mouseX;
+                lastPanY = mouseY;
+                viewerContainer.style.cursor = 'grabbing';
+            } else if (mode === 'draw' && event.target === overlayCanvas) {
+                isDrawing = true;
+                rectStartX = mouseX;
+                rectStartY = mouseY;
+                currentTempRect = null; // For live drawing feedback
+            }
+        }
+        
+        let currentTempRect = null; // Stores the current rectangle being drawn (viewport coords)
+
+        function handleMouseMove(event) {
+            if (!iiifInfo) return;
+            const rect = viewerContainer.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            if (isPanning) {
+                const dx = mouseX - lastPanX;
+                const dy = mouseY - lastPanY;
+
+                viewState.offsetX -= dx / viewState.zoom;
+                viewState.offsetY -= dy / viewState.zoom;
+                
+                // Clamp panning to image boundaries (optional, can be complex to get right with zoom)
+                // For now, allow panning beyond boundaries.
+
+                lastPanX = mouseX;
+                lastPanY = mouseY;
+                render();
+            } else if (isDrawing) {
+                const currentRectX = Math.min(rectStartX, mouseX);
+                const currentRectY = Math.min(rectStartY, mouseY);
+                const currentRectW = Math.abs(mouseX - rectStartX);
+                const currentRectH = Math.abs(mouseY - rectStartY);
+                currentTempRect = { x: currentRectX, y: currentRectY, w: currentRectW, h: currentRectH };
+                renderRectanglesOverlay(); // Only re-render overlay for drawing feedback
+            }
+        }
+
+        function handleMouseUp(event) {
+            if (isPanning) {
+                isPanning = false;
+                viewerContainer.style.cursor = 'grab';
+            } else if (isDrawing) {
+                isDrawing = false;
+                currentTempRect = null; 
+                // Finalize rectangle:
+                const rect = viewerContainer.getBoundingClientRect();
+                const mouseX = event.clientX - rect.left;
+                const mouseY = event.clientY - rect.top;
+
+                const vpX1 = rectStartX;
+                const vpY1 = rectStartY;
+                const vpX2 = mouseX;
+                const vpY2 = mouseY;
+
+                // Convert viewport to normalized image coordinates
+                const imgPt1 = viewportToImageNormalized(vpX1, vpY1);
+                const imgPt2 = viewportToImageNormalized(vpX2, vpY2);
+
+                if (imgPt1 && imgPt2) { // Ensure points are valid
+                    const normX = Math.min(imgPt1.x, imgPt2.x);
+                    const normY = Math.min(imgPt1.y, imgPt2.y);
+                    const normW = Math.abs(imgPt1.x - imgPt2.x);
+                    const normH = Math.abs(imgPt1.y - imgPt2.y);
+
+                    if (normW > 0.001 && normH > 0.001) { // Avoid tiny accidental rects
+                        rectangles.push({ x: normX, y: normY, w: normW, h: normH });
+                        updateCoordinatesDisplay();
+                        copyCoordinatesToClipboard();
+                    }
+                }
+                render(); // Full re-render to draw the finalized rectangle
+            }
+        }
+
+        function handleWheelZoom(event) {
+            if (!iiifInfo) return;
+            event.preventDefault(); // Prevent page scroll
+
+            const rect = viewerContainer.getBoundingClientRect();
+            const mouseX_vp = event.clientX - rect.left; // Mouse X in viewport
+            const mouseY_vp = event.clientY - rect.top;  // Mouse Y in viewport
+
+            // Mouse position in full image coordinates before zoom
+            const imgMouseX_before = viewState.offsetX + mouseX_vp / viewState.zoom;
+            const imgMouseY_before = viewState.offsetY + mouseY_vp / viewState.zoom;
+            
+            const zoomFactor = event.deltaY < 0 ? 1.1 : 1 / 1.1; // Zoom in or out
+            const newZoom = viewState.zoom * zoomFactor;
+
+            // Clamp zoom
+            viewState.zoom = Math.max(minZoomLevel, Math.min(newZoom, MAX_ZOOM_SCALE));
+
+            // Adjust offsetX, offsetY to keep mouse position stable
+            viewState.offsetX = imgMouseX_before - mouseX_vp / viewState.zoom;
+            viewState.offsetY = imgMouseY_before - mouseY_vp / viewState.zoom;
+            
+            render();
+        }
+
+        // --- Coordinate Transformations ---
+        function viewportToImageNormalized(vpX, vpY) {
+            if (!imageFullWidth || !imageFullHeight) return null;
+            // Viewport to full image coordinates
+            const imgX = viewState.offsetX + vpX / viewState.zoom;
+            const imgY = viewState.offsetY + vpY / viewState.zoom;
+
+            // Full image to normalized (0-1)
+            let normX = imgX / imageFullWidth;
+            let normY = imgY / imageFullHeight;
+            
+            // Clamp to [0, 1] range
+            normX = Math.max(0, Math.min(1, normX));
+            normY = Math.max(0, Math.min(1, normY));
+
+            return { x: normX, y: normY };
+        }
+
+
+        // --- Rectangle Management ---
+        function clearAllRectangles() {
+            rectangles = []; // Empty the array
+            updateCoordinatesDisplay();
+            render(); // Re-render to clear them from display
+            updateStatus("Rectangles cleared.");
+        }
+
+        function updateCoordinatesDisplay() {
+            if (rectangles.length === 0) {
+                coordinatesDisplay.textContent = "No rectangles drawn yet.";
+                return;
+            }
+            coordinatesDisplay.textContent = rectangles.map(r =>
+                `${r.x.toFixed(4)}, ${r.y.toFixed(4)}, ${r.w.toFixed(4)}, ${r.h.toFixed(4)}`
+            ).join('\n');
+        }
+
+        function copyCoordinatesToClipboard() {
+            if (rectangles.length === 0) return;
+            const textToCopy = rectangles.map(r =>
+                `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.w.toFixed(4)},${r.h.toFixed(4)}` // Comma separated, no space for easier parsing
+            ).join('\n');
+
+            navigator.clipboard.writeText(textToCopy)
+                .then(() => {
+                    updateStatus("Rectangle coordinates copied to clipboard!");
+                })
+                .catch(err => {
+                    console.error('Failed to copy coordinates: ', err);
+                    updateStatus("Failed to copy to clipboard. Check console/permissions.");
+                });
+        }
+
+        // --- Utility ---
+        function updateStatus(message) {
+            statusMessage.textContent = message;
+            // console.log("Status:", message); // Also log to console for debugging
+        }
+
+        // --- Start the app ---
+        init();
+
+    })();
+    </script>
+
+</body>
+</html>
+
+
+
+							<script>
+                            	
+    (function() {
+        // --- Configuration ---
+        const RECT_COLORS = [
+            'rgba(255, 0, 0, 0.3)',   // Red
+            'rgba(0, 255, 0, 0.3)',   // Green
+            'rgba(0, 0, 255, 0.3)',   // Blue
+            'rgba(255, 255, 0, 0.3)', // Yellow
+            'rgba(0, 255, 255, 0.3)', // Cyan
+            'rgba(255, 0, 255, 0.3)'  // Magenta
+        ];
+        const MIN_ZOOM_MARGIN = 0.95; // Allow zooming out slightly beyond fit-to-screen
+        const MAX_ZOOM_SCALE = 4;    // Max zoom relative to 1:1 pixel scale
+
+        // --- DOM Elements ---
+        const iiifUrlInput = document.getElementById('iiif-url');
+        const loadImageButton = document.getElementById('load-image');
+        const interactionModeSelect = document.getElementById('interaction-mode');
+        const clearRectsButton = document.getElementById('clear-rects');
+        const viewerContainer = document.getElementById('viewer-container');
+        const tileContainer = document.getElementById('tile-container');
+        const overlayCanvas = document.getElementById('overlay-canvas');
+        const overlayCtx = overlayCanvas.getContext('2d');
+        const coordinatesDisplay = document.getElementById('coordinates-display');
+        const statusMessage = document.getElementById('status-message');
+
+        // --- State Variables ---
+        let iiifInfo = null;
+        let imageFullWidth = 0;
+        let imageFullHeight = 0;
+
+        // Viewport state:
+        // offsetX, offsetY: top-left of the viewport in full image coordinates
+        // zoom: current display scale (displayedPixel / originalImagePixel)
+        let viewState = {
+            offsetX: 0,
+            offsetY: 0,
+            zoom: 1
+        };
+        let minZoomLevel = 1; // Calculated on image load
+
+        // Interaction state
+        let isPanning = false;
+        let lastPanX, lastPanY;
+        let isDrawing = false;
+        let rectStartX, rectStartY; // In viewport coordinates
+
+        // Rectangle data (normalized coordinates: x, y, w, h from 0.0 to 1.0)
+        // This variable `rectangles` is defined once in this scope and modified, not redefined.
+        let rectangles = [];
+
+        // --- Initialization ---
+        function init() {
+            loadImageButton.addEventListener('click', loadIIIFImage);
+            interactionModeSelect.addEventListener('change', switchInteractionMode);
+            clearRectsButton.addEventListener('click', clearAllRectangles);
+
+            viewerContainer.addEventListener('mousedown', handleMouseDown);
+            viewerContainer.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mouseup', handleMouseUp); // Use window for mouseup to catch drags outside viewer
+            viewerContainer.addEventListener('wheel', handleWheelZoom, { passive: false });
+            
+            window.addEventListener('resize', setupCanvases);
+
+            // Initial mode setup
+            switchInteractionMode();
+            loadIIIFImage(); // Load default image on page load
+        }
+
+        // --- IIIF Loading ---
+        async function loadIIIFImage() {
+            const url = iiifUrlInput.value.trim();
+            if (!url) {
+                updateStatus("Please enter a IIIF info.json URL.");
+                return;
+            }
+            updateStatus("Loading IIIF data...");
+            try {
+                const response = await fetch(url, { mode: 'cors' }); // anonymous CORS by default
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                iiifInfo = await response.json();
+                
+                imageFullWidth = iiifInfo.width;
+                imageFullHeight = iiifInfo.height;
+
+                if (!iiifInfo.tiles || !iiifInfo.tiles[0] || !iiifInfo.tiles[0].scaleFactors) {
+                    throw new Error("IIIF info.json does not contain necessary tile information (tiles[0].scaleFactors).");
+                }
+
+                updateStatus("Image info loaded. Rendering...");
+                setupCanvases(); // Resize canvases first
+                setInitialView();
+                render();
+            } catch (error) {
+                console.error("Failed to load IIIF info:", error);
+                updateStatus(`Error: ${error.message}`);
+                iiifInfo = null;
+                clearViewer();
+            }
+        }
+
+        function clearViewer() {
+            tileContainer.innerHTML = ''; // Remove all tile images
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+        }
+
+        function setInitialView() {
+            if (!imageFullWidth || !imageFullHeight) return;
+
+            const viewerRect = viewerContainer.getBoundingClientRect();
+            const aspectX = viewerRect.width / imageFullWidth;
+            const aspectY = viewerRect.height / imageFullHeight;
+            
+            viewState.zoom = Math.min(aspectX, aspectY);
+            minZoomLevel = viewState.zoom * MIN_ZOOM_MARGIN;
+
+            // Center the image if it's smaller than the viewport in one dimension
+            const displayedWidth = imageFullWidth * viewState.zoom;
+            const displayedHeight = imageFullHeight * viewState.zoom;
+
+            viewState.offsetX = (imageFullWidth / 2) - (viewerRect.width / 2 / viewState.zoom);
+            viewState.offsetY = (imageFullHeight / 2) - (viewerRect.height / 2 / viewState.zoom);
+            
+            // Adjust if image is letterboxed/pillarboxed to start at 0,0 visual for the content
+            if (aspectX < aspectY) { // Image is wider or perfectly fits width, possible letterbox
+                 viewState.offsetY = (imageFullHeight - viewerRect.height / viewState.zoom) / 2;
+                 viewState.offsetX = 0; // Start at left edge of image
+            } else { // Image is taller or perfectly fits height, possible pillarbox
+                 viewState.offsetX = (imageFullWidth - viewerRect.width / viewState.zoom) / 2;
+                 viewState.offsetY = 0; // Start at top edge of image
+            }
+            // Ensure initial view starts at 0,0 of the image content if it's smaller
+            // Correct for initial fit:
+            viewState.offsetX = 0;
+            viewState.offsetY = 0;
+        }
+
+        // --- Canvas and Rendering ---
+        function setupCanvases() {
+            const viewerRect = viewerContainer.getBoundingClientRect();
+            overlayCanvas.width = viewerRect.width;
+            overlayCanvas.height = viewerRect.height;
+            if (iiifInfo) render(); // Re-render if image is loaded
+        }
+
+        function render() {
+            if (!iiifInfo) return;
+            requestAnimationFrame(() => {
+                clearViewer(); // Clear old tiles and overlay before drawing new ones
+                renderTiles();
+                renderRectanglesOverlay();
+            });
+        }
+
+        function renderTiles() {
+            if (!iiifInfo || !imageFullWidth) return;
+
+            const viewerRect = viewerContainer.getBoundingClientRect();
+            const { offsetX, offsetY, zoom } = viewState;
+
+            // Determine appropriate IIIF level based on current zoom
+            // Target resolution: 1 on-screen pixel = 1 image pixel from the tile
+            // desired pixels per original image pixel = zoom
+            // desired scale factor for tiles = 1 / zoom (e.g. zoom 0.5 means scale factor 2)
+            const targetScaleFactor = 1 / zoom;
+            
+            const scaleFactors = iiifInfo.tiles[0].scaleFactors;
+            let bestLevelIndex = scaleFactors.length - 1; // Start with lowest resolution
+            for (let i = 0; i < scaleFactors.length; i++) {
+                if (scaleFactors[i] <= targetScaleFactor) {
+                    bestLevelIndex = i; // Found a scale factor that is good enough or better
+                    break; 
+                }
+            }
+            // If targetScaleFactor is smaller than all available, use highest res (index 0)
+            if (targetScaleFactor < scaleFactors[0]) bestLevelIndex = 0;
+
+
+            const currentScaleFactor = scaleFactors[bestLevelIndex];
+            const tileWidthNominal = iiifInfo.tiles[0].width;
+            const tileHeightNominal = iiifInfo.tiles[0].height || tileWidthNominal; // Assume square if not specified
+
+            // Calculate which tiles are visible
+            // Viewport bounds in full image coordinates
+            const viewLeft = offsetX;
+            const viewTop = offsetY;
+            const viewRight = offsetX + viewerRect.width / zoom;
+            const viewBottom = offsetY + viewerRect.height / zoom;
+
+            // Tile indices
+            const tileSourceWidth = tileWidthNominal * currentScaleFactor; // Width this tile covers in full image pixels
+            const tileSourceHeight = tileHeightNominal * currentScaleFactor;
+
+            const firstCol = Math.max(0, Math.floor(viewLeft / tileSourceWidth));
+            const lastCol = Math.min(Math.ceil(imageFullWidth / tileSourceWidth) -1, Math.floor(viewRight / tileSourceWidth));
+            const firstRow = Math.max(0, Math.floor(viewTop / tileSourceHeight));
+            const lastRow = Math.min(Math.ceil(imageFullHeight / tileSourceHeight) -1, Math.floor(viewBottom / tileSourceHeight));
+            
+            const baseUrl = iiifInfo['@id'] || iiifInfo['id']; // IIIF 2.0 vs 3.0
+
+            for (let r = firstRow; r <= lastRow; r++) {
+                for (let c = firstCol; c <= lastCol; c++) {
+                    const tileXFull = c * tileSourceWidth;
+                    const tileYFull = r * tileSourceHeight;
+                    
+                    let tileWFull = tileSourceWidth;
+                    let tileHFull = tileSourceHeight;
+
+                    // Adjust for edge tiles that are smaller than full tile size
+                    if (tileXFull + tileWFull > imageFullWidth) {
+                        tileWFull = imageFullWidth - tileXFull;
+                    }
+                    if (tileYFull + tileHFull > imageFullHeight) {
+                        tileHFull = imageFullHeight - tileYFull;
+                    }
+                    if (tileWFull <=0 || tileHFull <=0) continue;
+
+                    // Size parameter for IIIF URL: request tile at its native resolution for this level
+                    // The server will scale the region (tileXFull,tileYFull,tileWFull,tileHFull)
+                    // to be tileWidthAtThisLevel wide.
+                    const tileWidthAtThisLevel = Math.ceil(tileWFull / currentScaleFactor);
+                    // const tileHeightAtThisLevel = Math.ceil(tileHFull / currentScaleFactor); // Server calculates height
+
+                    const tileUrl = `${baseUrl}/${tileXFull},${tileYFull},${tileWFull},${tileHFull}/${tileWidthAtThisLevel},/0/default.jpg`;
+                    
+                    const img = document.createElement('img');
+                    img.crossOrigin = "anonymous"; // Handle CORS for images
+                    img.src = tileUrl;
+                    
+                    // Position and size on screen
+                    img.style.left = `${(tileXFull - offsetX) * zoom}px`;
+                    img.style.top = `${(tileYFull - offsetY) * zoom}px`;
+                    img.style.width = `${tileWFull * zoom}px`;
+                    img.style.height = `${tileHFull * zoom}px`;
+                    
+                    tileContainer.appendChild(img);
+                }
+            }
+        }
+
+        function renderRectanglesOverlay() {
+            if (!imageFullWidth) return;
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+            rectangles.forEach((rect, index) => {
+                // Convert normalized rect to full image coordinates
+                const imgX = rect.x * imageFullWidth;
+                const imgY = rect.y * imageFullHeight;
+                const imgW = rect.w * imageFullWidth;
+                const imgH = rect.h * imageFullHeight;
+
+                // Convert full image coordinates to viewport coordinates
+                const vpX = (imgX - viewState.offsetX) * viewState.zoom;
+                const vpY = (imgY - viewState.offsetY) * viewState.zoom;
+                const vpW = imgW * viewState.zoom;
+                const vpH = imgH * viewState.zoom;
+
+                overlayCtx.fillStyle = RECT_COLORS[index % RECT_COLORS.length];
+                overlayCtx.fillRect(vpX, vpY, vpW, vpH);
+            });
+
+            // If currently drawing, draw the temporary rectangle
+            if (isDrawing && currentTempRect) {
+                overlayCtx.fillStyle = RECT_COLORS[rectangles.length % RECT_COLORS.length];
+                overlayCtx.fillRect(currentTempRect.x, currentTempRect.y, currentTempRect.w, currentTempRect.h);
+            }
+        }
+
+        // --- Interaction Mode ---
+        function switchInteractionMode() {
+            const mode = interactionModeSelect.value;
+            if (mode === 'pan') {
+                viewerContainer.classList.remove('drawing');
+                viewerContainer.style.cursor = 'grab';
+                overlayCanvas.style.pointerEvents = 'none';
+            } else { // draw
+                viewerContainer.classList.add('drawing');
+                viewerContainer.style.cursor = 'crosshair';
+                overlayCanvas.style.pointerEvents = 'auto';
+            }
+        }
+
+        // --- Mouse Event Handlers ---
+        function handleMouseDown(event) {
+            // Prevent browser default drag behavior for images, if any leak through
+            if (event.target.tagName === 'IMG') {
+                event.preventDefault();
+            }
+
+            const mode = interactionModeSelect.value;
+            const rect = viewerContainer.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            if (mode === 'pan') {
+                isPanning = true;
+                lastPanX = mouseX;
+                lastPanY = mouseY;
+                viewerContainer.style.cursor = 'grabbing';
+            } else if (mode === 'draw' && event.target === overlayCanvas) {
+                isDrawing = true;
+                rectStartX = mouseX;
+                rectStartY = mouseY;
+                currentTempRect = null; // For live drawing feedback
+            }
+        }
+        
+        let currentTempRect = null; // Stores the current rectangle being drawn (viewport coords)
+
+        function handleMouseMove(event) {
+            if (!iiifInfo) return;
+            const rect = viewerContainer.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            if (isPanning) {
+                const dx = mouseX - lastPanX;
+                const dy = mouseY - lastPanY;
+
+                viewState.offsetX -= dx / viewState.zoom;
+                viewState.offsetY -= dy / viewState.zoom;
+                
+                // Clamp panning to image boundaries (optional, can be complex to get right with zoom)
+                // For now, allow panning beyond boundaries.
+
+                lastPanX = mouseX;
+                lastPanY = mouseY;
+                render();
+            } else if (isDrawing) {
+                const currentRectX = Math.min(rectStartX, mouseX);
+                const currentRectY = Math.min(rectStartY, mouseY);
+                const currentRectW = Math.abs(mouseX - rectStartX);
+                const currentRectH = Math.abs(mouseY - rectStartY);
+                currentTempRect = { x: currentRectX, y: currentRectY, w: currentRectW, h: currentRectH };
+                renderRectanglesOverlay(); // Only re-render overlay for drawing feedback
+            }
+        }
+
+        function handleMouseUp(event) {
+            if (isPanning) {
+                isPanning = false;
+                viewerContainer.style.cursor = 'grab';
+            } else if (isDrawing) {
+                isDrawing = false;
+                currentTempRect = null; 
+                // Finalize rectangle:
+                const rect = viewerContainer.getBoundingClientRect();
+                const mouseX = event.clientX - rect.left;
+                const mouseY = event.clientY - rect.top;
+
+                const vpX1 = rectStartX;
+                const vpY1 = rectStartY;
+                const vpX2 = mouseX;
+                const vpY2 = mouseY;
+
+                // Convert viewport to normalized image coordinates
+                const imgPt1 = viewportToImageNormalized(vpX1, vpY1);
+                const imgPt2 = viewportToImageNormalized(vpX2, vpY2);
+
+                if (imgPt1 && imgPt2) { // Ensure points are valid
+                    const normX = Math.min(imgPt1.x, imgPt2.x);
+                    const normY = Math.min(imgPt1.y, imgPt2.y);
+                    const normW = Math.abs(imgPt1.x - imgPt2.x);
+                    const normH = Math.abs(imgPt1.y - imgPt2.y);
+
+                    if (normW > 0.001 && normH > 0.001) { // Avoid tiny accidental rects
+                        rectangles.push({ x: normX, y: normY, w: normW, h: normH });
+                        updateCoordinatesDisplay();
+                        copyCoordinatesToClipboard();
+                    }
+                }
+                render(); // Full re-render to draw the finalized rectangle
+            }
+        }
+
+        function handleWheelZoom(event) {
+            if (!iiifInfo) return;
+            event.preventDefault(); // Prevent page scroll
+
+            const rect = viewerContainer.getBoundingClientRect();
+            const mouseX_vp = event.clientX - rect.left; // Mouse X in viewport
+            const mouseY_vp = event.clientY - rect.top;  // Mouse Y in viewport
+
+            // Mouse position in full image coordinates before zoom
+            const imgMouseX_before = viewState.offsetX + mouseX_vp / viewState.zoom;
+            const imgMouseY_before = viewState.offsetY + mouseY_vp / viewState.zoom;
+            
+            const zoomFactor = event.deltaY < 0 ? 1.1 : 1 / 1.1; // Zoom in or out
+            const newZoom = viewState.zoom * zoomFactor;
+
+            // Clamp zoom
+            viewState.zoom = Math.max(minZoomLevel, Math.min(newZoom, MAX_ZOOM_SCALE));
+
+            // Adjust offsetX, offsetY to keep mouse position stable
+            viewState.offsetX = imgMouseX_before - mouseX_vp / viewState.zoom;
+            viewState.offsetY = imgMouseY_before - mouseY_vp / viewState.zoom;
+            
+            render();
+        }
+
+        // --- Coordinate Transformations ---
+        function viewportToImageNormalized(vpX, vpY) {
+            if (!imageFullWidth || !imageFullHeight) return null;
+            // Viewport to full image coordinates
+            const imgX = viewState.offsetX + vpX / viewState.zoom;
+            const imgY = viewState.offsetY + vpY / viewState.zoom;
+
+            // Full image to normalized (0-1)
+            let normX = imgX / imageFullWidth;
+            let normY = imgY / imageFullHeight;
+            
+            // Clamp to [0, 1] range
+            normX = Math.max(0, Math.min(1, normX));
+            normY = Math.max(0, Math.min(1, normY));
+
+            return { x: normX, y: normY };
+        }
+
+
+        // --- Rectangle Management ---
+        function clearAllRectangles() {
+            rectangles = []; // Empty the array
+            updateCoordinatesDisplay();
+            render(); // Re-render to clear them from display
+            updateStatus("Rectangles cleared.");
+        }
+
+        function updateCoordinatesDisplay() {
+            if (rectangles.length === 0) {
+                coordinatesDisplay.textContent = "No rectangles drawn yet.";
+                return;
+            }
+            coordinatesDisplay.textContent = rectangles.map(r =>
+                `${r.x.toFixed(4)}, ${r.y.toFixed(4)}, ${r.w.toFixed(4)}, ${r.h.toFixed(4)}`
+            ).join('\n');
+        }
+
+        function copyCoordinatesToClipboard() {
+            if (rectangles.length === 0) return;
+            const textToCopy = rectangles.map(r =>
+                `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.w.toFixed(4)},${r.h.toFixed(4)}` // Comma separated, no space for easier parsing
+            ).join('\n');
+
+            navigator.clipboard.writeText(textToCopy)
+                .then(() => {
+                    updateStatus("Rectangle coordinates copied to clipboard!");
+                })
+                .catch(err => {
+                    console.error('Failed to copy coordinates: ', err);
+                    updateStatus("Failed to copy to clipboard. Check console/permissions.");
+                });
+        }
+
+        // --- Utility ---
+        function updateStatus(message) {
+            statusMessage.textContent = message;
+            // console.log("Status:", message); // Also log to console for debugging
+        }
+
+        // --- Start the app ---
+        init();
+
+    })();
+    
+
+							</script>
+                        </body>
+                        </html>
+                    
