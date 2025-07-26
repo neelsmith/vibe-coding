@@ -8,3 +8,7 @@ Please modify this to allow the user either to upload a delimited text file, or 
 
 Excellent! Now add options allowing the user to choose (1) sort the data either by data value, or by count of occurrences, and (2) sort ascending or sort descending.
 Also -- in choosing the source for delimited-text data, make choose from a local file the default choice.
+
+---
+
+Great! Could you add an option to omit empty values from the histogram?

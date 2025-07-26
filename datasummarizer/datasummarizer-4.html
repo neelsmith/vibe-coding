@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Data Summarizer</title>
+    
+    <!-- 1. Include Chart.js library from a CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f7f6;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        #app {
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 25px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+        }
+        h1, h2 {
+            color: #2c3e50;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
+        }
+        .section {
+            margin-bottom: 25px;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        textarea {
+            width: 100%;
+            height: 150px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        input[type="text"], input[type="url"], input[type="number"], select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        input[type="file"] {
+            padding: 5px;
+            width: 100%;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        button:disabled {
+            background-color: #a9a9a9;
+            cursor: not-allowed;
+        }
+        .input-group, .config-group {
+            display: flex;
+            gap: 15px;
+            align-items: flex-end;
+            margin-top: 15px;
+        }
+        .input-group > div, .config-group > div {
+            flex: 1;
+        }
+        .source-container {
+            margin-top: 10px;
+        }
+        #configSection, #numericOptions {
+            display: none; /* Initially hidden */
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            background-color: #fafafa;
+        }
+        #numericOptions .radio-group {
+            margin-bottom: 15px;
+        }
+        #numericOptions label, .checkbox-label {
+            font-weight: normal;
+            display: inline-block;
+            margin-right: 15px;
+        }
+        #chartContainer {
+            margin-top: 30px;
+            position: relative;
+            height: 450px;
+        }
+        .radio-label {
+            font-weight: normal; 
+            display: inline-block;
+            margin-right: 20px;
+        }
+        #filterOptions {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app">
+        <h1>Advanced Data Summarizer</h1>
+
+        <!-- SECTION 1: DATA INPUT -->
+        <div class="section">
+            <h2>1. Provide Your Data</h2>
+            
+            <div>
+                <label>Choose Data Source:</label>
+                <label class="radio-label"><input type="radio" name="dataSource" value="upload" checked> Upload File</label>
+                <label class="radio-label"><input type="radio" name="dataSource" value="paste"> Paste Text</label>
+                <label class="radio-label"><input type="radio" name="dataSource" value="url"> Fetch from URL</label>
+            </div>
+
+            <div id="uploadContainer" class="source-container">
+                <label for="fileInput">Select a text file (.csv, .tsv, .txt):</label>
+                <input type="file" id="fileInput" accept=".txt,.csv,.tsv,.text">
+            </div>
+
+            <div id="pasteContainer" class="source-container" style="display:none;">
+                <label for="dataInput">Paste your delimited text data here (first row should be headers):</label>
+                <textarea id="dataInput">City|Country|Population|Area_sq_km
+Tokyo|Japan|37400068|13452
+Delhi|India|28514000|1484
+Shanghai|China|25582000|6340.5
+Sao Paulo|Brazil|21650000|1521
+Mexico City|Mexico|21581000|1485
+|Egypt|20076000|3085
+Mumbai||19980000|603.4
+Beijing|China||16410.54
+Osaka|Japan|19281000|223
+</textarea>
+            </div>
+
+            <div id="urlContainer" class="source-container" style="display:none;">
+                <label for="urlInput">Enter URL of a raw text file (must have CORS enabled):</label>
+                <input type="url" id="urlInput" placeholder="https://example.com/data.csv">
+            </div>
+            
+            <div class="input-group">
+                <div>
+                    <label for="delimiterSelector">Delimiter</label>
+                    <select id="delimiterSelector">
+                        <option value="|">Pipe (|)</option>
+                        <option value=",">Comma (,)</option>
+                        <option value="	">Tab</option>
+                    </select>
+                </div>
+                <div>
+                    <button id="parseButton">Load and Parse Data</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- SECTION 2: CONFIGURATION -->
+        <div id="configSection" class="section">
+            <h2>2. Configure Summary</h2>
+            <label for="fieldSelector">Choose a field to summarize:</label>
+            <select id="fieldSelector">
+                <option value="">-- Select a field --</option>
+            </select>
+
+            <div id="numericOptions">
+                <strong>Numeric Field Options</strong>
+                <div class="radio-group">
+                    <label><input type="radio" name="binningMethod" value="count" checked> By Number of Bins</label>
+                    <label><input type="radio" name="binningMethod" value="size"> By Size of Bins</label>
+                </div>
+                <div id="binCountGroup">
+                    <label for="numBinsInput">Number of Bins:</label>
+                    <input type="number" id="numBinsInput" value="5" min="1">
+                </div>
+                 <div id="binSizeGroup" style="display:none;">
+                    <label for="binSizeInput">Size of each Bin:</label>
+                    <input type="number" id="binSizeInput" value="10000000" min="0.001" step="any">
+                </div>
+            </div>
+            
+            <div id="filterOptions">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="omitEmptyCheckbox"> Omit empty values
+                </label>
+            </div>
+
+            <div class="config-group">
+                 <div>
+                    <label for="sortBySelector">Sort By</label>
+                    <select id="sortBySelector">
+                        <option value="label">Value / Label</option>
+                        <option value="count">Count / Frequency</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="sortOrderSelector">Sort Order</label>
+                    <select id="sortOrderSelector">
+                        <option value="asc">Ascending</option>
+                        <option value="desc">Descending</option>
+                    </select>
+                </div>
+            </div>
+
+            <button id="summarizeButton" style="margin-top: 15px;">Generate Summary Chart</button>
+        </div>
+
+        <!-- SECTION 3: OUTPUT -->
+        <div class="section">
+            <div id="chartContainer">
+                <canvas id="summaryChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- GLOBAL STATE & ELEMENT REFS ---
+        let parsedData = [];
+        let headers = [];
+        let myChart = null;
+
+        const parseButton = document.getElementById('parseButton');
+        const summarizeButton = document.getElementById('summarizeButton');
+        const fieldSelector = document.getElementById('fieldSelector');
+        const numericOptions = document.getElementById('numericOptions');
+        const dataSourceRadios = document.querySelectorAll('input[name="dataSource"]');
+        const pasteContainer = document.getElementById('pasteContainer');
+        const uploadContainer = document.getElementById('uploadContainer');
+        const urlContainer = document.getElementById('urlContainer');
+        
+        // --- EVENT LISTENERS ---
+        parseButton.addEventListener('click', loadAndParseData);
+        summarizeButton.addEventListener('click', generateSummary);
+        fieldSelector.addEventListener('change', handleFieldSelection);
+        dataSourceRadios.forEach(radio => radio.addEventListener('change', handleDataSourceChange));
+
+        document.querySelectorAll('input[name="binningMethod"]').forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                document.getElementById('binCountGroup').style.display = e.target.value === 'count' ? 'block' : 'none';
+                document.getElementById('binSizeGroup').style.display = e.target.value === 'size' ? 'block' : 'none';
+            });
+        });
+        
+        // --- DATA LOADING & PARSING ---
+
+        function handleDataSourceChange(event) {
+            pasteContainer.style.display = 'none';
+            uploadContainer.style.display = 'none';
+            urlContainer.style.display = 'none';
+            const containerId = `${event.target.value}Container`;
+            document.getElementById(containerId).style.display = 'block';
+        }
+        
+        async function loadAndParseData() {
+            const selectedSource = document.querySelector('input[name="dataSource"]:checked').value;
+            let dataText = '';
+            parseButton.disabled = true;
+            parseButton.textContent = 'Loading...';
+
+            try {
+                switch(selectedSource) {
+                    case 'paste':
+                        dataText = document.getElementById('dataInput').value;
+                        break;
+                    case 'upload':
+                        const file = document.getElementById('fileInput').files[0];
+                        if (!file) throw new Error("Please select a file to upload.");
+                        dataText = await file.text();
+                        break;
+                    case 'url':
+                        const url = document.getElementById('urlInput').value;
+                        if (!url) throw new Error("Please enter a URL.");
+                        const response = await fetch(url);
+                        if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
+                        dataText = await response.text();
+                        break;
+                }
+                parseTextData(dataText);
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            } finally {
+                parseButton.disabled = false;
+                parseButton.textContent = 'Load and Parse Data';
+            }
+        }
+
+        function parseTextData(dataText) {
+            const delimiter = document.getElementById('delimiterSelector').value;
+            if (!dataText.trim() || !delimiter) {
+                alert("Data is empty or no delimiter selected.");
+                return;
+            }
+            const lines = dataText.trim().replace(/\r\n/g, '\n').split('\n');
+            headers = lines[0].split(delimiter).map(h => h.trim());
+            parsedData = lines.slice(1).map(line => {
+                const values = line.split(delimiter);
+                const row = {};
+                headers.forEach((header, index) => {
+                    row[header] = values[index] ? values[index].trim() : '';
+                });
+                return row;
+            });
+            fieldSelector.innerHTML = '<option value="">-- Select a field --</option>';
+            headers.forEach(header => fieldSelector.add(new Option(header, header)));
+            document.getElementById('configSection').style.display = 'block';
+            numericOptions.style.display = 'none';
+            if (myChart) myChart.destroy();
+        }
+
+        // --- UI & SUMMARY LOGIC ---
+
+        function handleFieldSelection() {
+            const selectedField = fieldSelector.value;
+            if (!selectedField) {
+                numericOptions.style.display = 'none';
+                return;
+            }
+            let isNumeric = true, checkedRows = 0;
+            for(let i = 0; i < parsedData.length && checkedRows < 20; i++){
+                const value = parsedData[i][selectedField];
+                if (value) {
+                    if (isNaN(Number(value))) { isNumeric = false; break; }
+                    checkedRows++;
+                }
+            }
+            numericOptions.style.display = (isNumeric && checkedRows > 0) ? 'block' : 'none';
+        }
+
+        function generateSummary() {
+            const selectedField = fieldSelector.value;
+            if (!selectedField) {
+                alert("Please select a field to summarize.");
+                return;
+            }
+
+            // Filter data if the 'omit empty' checkbox is checked
+            const omitEmpty = document.getElementById('omitEmptyCheckbox').checked;
+            let dataToSummarize = parsedData;
+            if (omitEmpty) {
+                dataToSummarize = parsedData.filter(row => {
+                    const value = row[selectedField];
+                    return value !== null && value !== undefined && String(value).trim() !== '';
+                });
+            }
+
+            const isNumeric = numericOptions.style.display === 'block';
+            let summaryData = isNumeric 
+                ? summarizeNumericData(dataToSummarize, selectedField) 
+                : summarizeStringData(dataToSummarize, selectedField);
+            
+            if (summaryData && summaryData.data.length > 0) {
+                const { sortedLabels, sortedData } = sortChartData(summaryData.data);
+                renderChart(sortedLabels, sortedData, summaryData.title);
+            } else if (summaryData) {
+                 alert("No data left to display after filtering.");
+                 if (myChart) myChart.destroy();
+            }
+        }
+        
+        // NOTE: These functions now accept 'data' as the first argument
+        function summarizeStringData(data, field) {
+            const counts = {};
+            data.forEach(row => {
+                const value = row[field] || " (empty)";
+                counts[value] = (counts[value] || 0) + 1;
+            });
+            const summary = Object.keys(counts).map(key => ({
+                label: key,
+                count: counts[key],
+                sortValue: key
+            }));
+            return { data: summary, title: `Count of ${field}` };
+        }
+
+        function summarizeNumericData(data, field) {
+            const values = data.map(row => parseFloat(row[field])).filter(v => !isNaN(v));
+            if (values.length === 0) {
+                return { data: [], title: `Histogram of ${field}` };
+            }
+            values.sort((a, b) => a - b);
+            const min = values[0], max = values[values.length - 1];
+            
+            let bins = [];
+            const binningMethod = document.querySelector('input[name="binningMethod"]:checked').value;
+
+            if (binningMethod === 'count') {
+                const numBins = parseInt(document.getElementById('numBinsInput').value, 10);
+                if (numBins < 1) { alert("Bins must be at least 1."); return null; }
+                const binSize = (max - min) / numBins || 1;
+                for (let i = 0; i < numBins; i++) {
+                    const start = min + (i * binSize);
+                    bins.push({ label: `[${start.toFixed(2)} - ${(start + binSize).toFixed(2)})`, count: 0, sortValue: start });
+                }
+                values.forEach(value => {
+                    let binIndex = Math.floor((value - min) / binSize);
+                    if (binIndex >= numBins) binIndex = numBins - 1;
+                    if(bins[binIndex]) bins[binIndex].count++;
+                });
+            } else {
+                const binSize = parseFloat(document.getElementById('binSizeInput').value);
+                if (binSize <= 0) { alert("Bin size must be > 0."); return null; }
+                const numBins = Math.ceil((max - min) / binSize) || 1;
+                for (let i = 0; i < numBins; i++) {
+                    const start = min + (i * binSize);
+                    bins.push({ label: `[${start.toFixed(2)} - ${(start + binSize).toFixed(2)})`, count: 0, sortValue: start });
+                }
+                values.forEach(value => {
+                    let binIndex = Math.floor((value - min) / binSize);
+                    if (binIndex >= numBins) binIndex = numBins - 1;
+                    if(bins[binIndex]) bins[binIndex].count++;
+                });
+            }
+            return { data: bins, title: `Histogram of ${field}` };
+        }
+
+        // --- SORTING & CHARTING ---
+
+        function sortChartData(dataToSort) {
+            const sortBy = document.getElementById('sortBySelector').value;
+            const sortOrder = document.getElementById('sortOrderSelector').value === 'asc' ? 1 : -1;
+            dataToSort.sort((a, b) => {
+                let comparison = (sortBy === 'label')
+                    ? (typeof a.sortValue === 'number' ? a.sortValue - b.sortValue : String(a.sortValue).localeCompare(String(b.sortValue)))
+                    : a.count - b.count;
+                return comparison * sortOrder;
+            });
+            return {
+                sortedLabels: dataToSort.map(d => d.label),
+                sortedData: dataToSort.map(d => d.count)
+            };
+        }
+        
+        function renderChart(labels, data, title) {
+            const ctx = document.getElementById('summaryChart').getContext('2d');
+            if (myChart) myChart.destroy();
+            myChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Count',
+                        data: data,
+                        backgroundColor: 'rgba(52, 152, 219, 0.6)',
+                        borderColor: 'rgba(52, 152, 219, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        title: { display: true, text: title, font: { size: 18 } }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, title: { display: true, text: 'Frequency / Count' } },
+                        x: { title: { display: true, text: 'Value / Bin' } }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
